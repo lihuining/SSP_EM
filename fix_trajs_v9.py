@@ -606,7 +606,7 @@ def cluster_fix(result, mapping_edge_id_to_cost, mapping_node_id_to_bbox, mappin
     curr_batch_frame_node_list = {}  # dict,包含每帧包含节点id
     ##### 画出ssp当中单个点形成的轨迹 #####
     def getDictKey_1(myDict, value):
-        return [k for k, v in myDict.items() if value in list(v.keys())][0]
+        return [k for k, v in myDict.items() if value in list(v.keys())][0] # k:track_id
     source = '/home/allenyljiang/Documents/Dataset/MOT20/train/MOT20-01/img1'
     def show_single_tracks(tracks_SSP):
         tracks = {}
@@ -688,8 +688,9 @@ def cluster_fix(result, mapping_edge_id_to_cost, mapping_node_id_to_bbox, mappin
                             indefinite_node])  # each row is a person bbox information eg:(49,4)
     scaler_bbox = StandardScaler()
     normed_bbox_data = scaler_bbox.fit_transform(bbox_matrix)
-    pca = PCA(n_components=0.9)
+    pca = PCA(n_components=5)
     reid_pca = pca.fit_transform(normed_reid_data)
+    # print('dimension after PCA',reid_pca.shape[1])
     unique_frame_list = sorted(np.unique([mapping_node_id_to_bbox[x][2] for x in mapping_node_id_to_bbox]))
     index_matrix = np.ones(tracklet_len) - np.eye(tracklet_len)
     time_matrix = np.array([int(mapping_node_id_to_bbox[x][2].split('.')[0]) for x in indefinite_node]).reshape(-1,1)  # frame number(int)
@@ -751,7 +752,9 @@ def cluster_fix(result, mapping_edge_id_to_cost, mapping_node_id_to_bbox, mappin
             cluster_tracks[remained_tracks[idx]] = mapping_dict
         else:
             track_id = idx - (len(remained_tracks)-1) + list(trajectory_idswitch_reliability_dict.keys())[-1]
+            # remained_tracks.append(track_id)
             cluster_tracks[track_id] = mapping_dict
+    # remained_tracks需要在这之后改变
 
     # 6. Visualize obtained results
     def show_clusters(cluster_tracks):
@@ -779,9 +782,9 @@ def cluster_fix(result, mapping_edge_id_to_cost, mapping_node_id_to_bbox, mappin
     # kmeans_visualizer.show_clusters(sample, clusters, final_centers)
     ##### 整理结果并且返回 #####
     split_each_track_refined = {}
-    for track_id in list(split_each_track.keys()):
+    for track_id in np.unique(list(split_each_track.keys()) + list(cluster_tracks.keys())).tolist():
         # if trajectory_idswitch_reliability_dict[track_id][0] == tracklet_len:
-        if track_id not in remained_tracks:
+        if track_id not in list(cluster_tracks.keys()):
             split_each_track_refined[track_id] = copy.deepcopy(split_each_track[track_id])
         else:
             for node_to_add in cluster_tracks[track_id]:

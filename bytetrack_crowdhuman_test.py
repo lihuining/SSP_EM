@@ -160,8 +160,9 @@ batch_id = 0
 frame_height = 0
 frame_width = 0
 skeletons = [[15, 13], [13, 11], [16, 14], [14, 12], [11, 12], [5, 11], [6, 12], [5, 6], [5, 7], [6, 8], [7, 9], [8, 10], [1, 2], [0, 1], [0, 2], [1, 3], [2, 4], [3, 5], [4, 6]]
-batch_stride = tracklet_len - 1
+batch_stride = tracklet_len
 batch_stride_write = tracklet_len - 1
+det_cnt = 0 # counting the number of detections
 foreign_matter_cls_id_dict = {
 'bicycle': 1,
 'motorcycle': 3,
@@ -610,6 +611,7 @@ def conduct_pose_estimation(webcam, path, out, im0s, pred, img, dataset, save_tx
     # img - current image array with shape 1x3x1088x1920
     # tracklet_inner_cnt - index of frame
     # pose_model, pose_transform - model for pose estimation
+    global det_cnt
     for i, det in enumerate(pred):  # detections per image
         if webcam:  # batch_size >= 1
             p, s, im0 = path[i], '%g: ' % i, im0s[i].copy()
@@ -761,6 +763,7 @@ def conduct_pose_estimation(webcam, path, out, im0s, pred, img, dataset, save_tx
     dstfile = os.path.join('/home/allenyljiang/Documents/Dataset/MOT20/train/MOT20-01/'+ 'detect'+str(bbox_confidence_threshold)+'/'+ path.split('/')[-1])
     # dstfile = path.split('.jpg')[0] + '_detect.jpg'
     print(len(box_detected))
+    det_cnt += len(box_detected)
     for idx,bbox in enumerate(box_detected):
         cv2.rectangle(img,(int(bbox[0][0]),int(bbox[0][1])),(int(bbox[1][0]),int(bbox[1][1])),(0,255,0),2)
         cv2.putText(img,str(round(box_confidence_scores[idx],2)),(int((int(bbox[0][0])+int(bbox[1][0]))/2),int((int(bbox[0][1])+int(bbox[1][1]))/2)),cv2.FONT_HERSHEY_SIMPLEX,1,(0,0,255),2)
@@ -2257,7 +2260,7 @@ def detect(opt,exp, need_face_recognition_switch = 0, face_verification_thresh =
     global current_video_segment_representative_frames_backup
     global current_video_segment_all_traj_all_object_features_backup
     global stitching_tracklets_dict
-    global batch_id,batch_stride,batch_stride_write
+    global batch_id,batch_stride,batch_stride_write,det_cnt
     global frame_width
     global frame_height
     global tracklet_len
@@ -2394,7 +2397,7 @@ def detect(opt,exp, need_face_recognition_switch = 0, face_verification_thresh =
     batch_id = 0 # window_id
     base_track_id = 0 # 写数据时的轨迹编号
     #all_video_predicted_tracks = {}
-    batch_stride = tracklet_len - 1
+    batch_stride = tracklet_len
     batch_stride_write = tracklet_len - 1
     tracklet_inner_cnt = tracklet_len - 1 # 只有跟踪之后才改变值,9
     current_video_segment_predicted_tracks_backup = {}
@@ -2423,7 +2426,7 @@ def detect(opt,exp, need_face_recognition_switch = 0, face_verification_thresh =
         pred = model(img) # (1,10710,6)
         num_classes = 1
         confthre = 0.01
-        nmsthre = 0.4
+        nmsthre = 0.5
         pred = postprocess(pred, num_classes, confthre, nmsthre)  # the class is 0
         # Apply NMS
         # pred = non_max_suppression(pred, opt['conf_thres'], opt['iou_thres'], classes=opt['classes'], agnostic=opt['agnostic_nms'])
@@ -2504,7 +2507,7 @@ def parse_opt():
     parser = argparse.ArgumentParser()#　照片要jpg格式
     # /usr/local/SSP_EM/05_0019
     # /home/allenyljiang/Documents/Dataset/MOT20/train/MOT20-01/img1
-    parser.add_argument('--source', type=str, default='/home/allenyljiang/Documents/Dataset/MOT20/train/MOT20-01/img1', help='file/dir/URL/glob, 0 for webcam')#/media/allenyljiang/Seagate_Backup_Plus_Drive/usr/local/VIBE-master/data/neurocomputing/05_0019
+    parser.add_argument('--source', type=str, default='/home/allenyljiang/Documents/Dataset/MOT20/train/MOT20-01/img_test', help='file/dir/URL/glob, 0 for webcam')#/media/allenyljiang/Seagate_Backup_Plus_Drive/usr/local/VIBE-master/data/neurocomputing/05_0019
 
     opt = parser.parse_args()
     return opt
@@ -2552,7 +2555,7 @@ if __name__ == '__main__':
     args = make_parser().parse_args()#解析参数
     exp = get_exp(args.exp_file, args.name)# 模型参数（键值对形式）
     detect(opt,exp,args)
-
+    print(det_cnt)
     #snapshot = tracemalloc.take_snapshot()
     # tracemalloc_snapshot(snapshot)
     # snapshot = tracemalloc.take_snapshot() #  快照,当前内存分配
