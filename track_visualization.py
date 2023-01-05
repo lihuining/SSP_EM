@@ -1,22 +1,25 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import cv2
+import os
+folder = 'MOT20-01'
 # 检测轨迹结果
-track_seq_path = r'/home/allenyljiang/Documents/Dataset/MOT20/train/MOT20-01/det/det.txt'
+track_seq_path = os.path.join('/home/allenyljiang/Documents/Dataset/MOT20/train',folder,'gt/gt.txt')
 track_seq = np.loadtxt(track_seq_path,delimiter = ',')
 # track_seq = track_seq[0:100,:]
 lines_length = int(track_seq[:,0].max())
 unique_track_id = np.unique(track_seq[:,1]) # 总的轨迹数目
 print('轨迹数目',len(unique_track_id))
 
-img = cv2.imread(r'/home/allenyljiang/Documents/Dataset/MOT16/train/MOT16-02/img1/000001.jpg')
-
-dst_path = r'/home/allenyljiang/Documents/Dataset/MOT16/train/MOT16-05/tracklet.jpg'
+img = cv2.imread(os.path.join('/home/allenyljiang/Documents/Dataset/MOT20/train',folder,'img1/000001.jpg'))
+dst_path = os.path.join('/home/allenyljiang/Documents/Dataset/MOT20/train',folder,'tracklet.jpg')
 track_length_list = []
 frame_dict = {}
 frame_mask = []
 velocity_hori = []
 velocity_vert = []
+velocity_hori_std_list = []
+velocity_vert_std_list = []
 for track_id in range(len(unique_track_id)): # 画出每一条轨迹
     # 轨迹名称
     # unique_track_id[track_id]
@@ -30,8 +33,12 @@ for track_id in range(len(unique_track_id)): # 画出每一条轨迹
 
     y =  dets[:, 0:2] + 1/2*dets[:, 2:4] # 人体中心点,标准mot格式
     v_hori = y[1:,0]-y[0:-1,0] # 水平速度
+    # print('standard error of horizontal velocity',np.std(v_hori))
+    velocity_hori_std_list.append(np.std(v_hori))
     velocity_hori.append(np.mean(v_hori))
     v_vert = y[1:,0]-y[0:-1,0] # 垂直速度
+    # print('standard error of vertical velocity', np.std(v_vert))
+    velocity_vert_std_list.append(np.std(v_vert))
     velocity_vert.append(np.mean(v_vert))
     track_length_list.append(len(y)) # 全是连续的
     #y = 1/2*(dets[:, 0:2]+dets[:,2:4]) #  x1y1x2y2模式
@@ -51,8 +58,8 @@ for track_id in range(len(unique_track_id)): # 画出每一条轨迹
 # cv2.imwrite(dst_path,img)
 print(track_length_list)
 print('水平速度:',velocity_hori)
-
 print('垂直速度:',velocity_vert)
+print(max(velocity_hori_std_list),max(velocity_vert_std_list))
 print(frame_mask)
 # ####  格式转换 ####
 # considerd_set = {1,2,7}
