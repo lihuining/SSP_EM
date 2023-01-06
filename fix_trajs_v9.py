@@ -101,7 +101,8 @@ def cosine_similarity(vec1,vec2):
 
 
 def convert_track_to_stitch_format(split_each_track,mapping_node_id_to_bbox,mapping_node_id_to_features,split_each_track_valid_mask):
-    iou_thresh = 0.507 # 0.789
+    iou_thresh = 0.55 # 0.789
+    iou_thresh_step = 0.015
     curr_predicted_tracks = {}
     curr_predicted_tracks_bboxes = {}
     curr_predicted_tracks_bboxes_test = {} # 测试使用
@@ -113,6 +114,7 @@ def convert_track_to_stitch_format(split_each_track,mapping_node_id_to_bbox,mapp
     trajectory_node_dict = {}
     trajectory_idswitch_dict = {}
     trajectory_idswitch_reliability_dict = {} # 保存每条轨迹切断的每一段置信度  key:trajectory id value:list eg[1,3,5]  the sum of node_valid_mask
+    trajectory_iou_list = []
     for track_id in split_each_track:
         # curr_predicted_tracks[track_id] = mapping_frameid_to_human_centers
         confidence_score_max = 0
@@ -135,27 +137,39 @@ def convert_track_to_stitch_format(split_each_track,mapping_node_id_to_bbox,mapp
             # mapping_node_id_to_bbox[mapping_node_id_to_bbox.index(int(node_pair[0]))][2] # str:img
             frame_id = mapping_node_id_to_bbox[node_id][2]  # 转化为int进行加减
             bbox = mapping_node_id_to_bbox[node_id][0]
+            mapping_frameid_to_human_centers[int(frame_id.split('.')[0])] = [(bbox[0][0] + bbox[1][0]) / 2,
+                                                                             (bbox[0][1] + bbox[1][1]) / 2]  # 同一帧中图片相连?
+            idx_tmp = 1 # initial value
             # [bbox_pre[0][1], bbox_pre[1][1], bbox_pre[0][0], bbox_pre[1][0]]
             if idx >= 1:
                 iou_similarity = compute_iou_single_box([bbox[0][1], bbox[1][1], bbox[0][0], bbox[1][0]],[bbox_pre[0][1], bbox_pre[1][1], bbox_pre[0][0], bbox_pre[1][0]])
-                # print(iou_similarity)
-            if idx >= 1 and iou_similarity < iou_thresh:
-                #print(track_id,idx,iou_similarity)
-                trajectory_idswitch_list.append(int(idx/2))
-                trajectory_idswitch_reliability_list.append(trajectory_idswitch_reliability)
-                trajectory_idswitch_reliability = 0
+                #print(iou_similarity)
+                #velocity_x = (bbox[0][0] + bbox[1][0]) / 2 - (bbox_pre[0][0] + bbox_pre[1][0]) / 2 # x-axis
+                #velocity_y = (bbox[0][1] + bbox[1][1]) / 2 - (bbox_pre[0][1] + bbox_pre[1][1]) / 2 # y-axis
+                iou_thresh_tmp = iou_thresh + (idx-idx_tmp)*iou_thresh_step/2
+                if iou_similarity < iou_thresh_tmp:
+                        #or (np.sign(velocity_x*velocity_x_pre)+np.sign(velocity_y*velocity_y_pre)) == -2:
+                    print(track_id,idx,iou_similarity)
+                    trajectory_idswitch_list.append(int(idx/2))
+                    idx_tmp = int(idx)
+                    iou_thresh_tmp = copy.deepcopy(iou_thresh)
+                    trajectory_idswitch_reliability_list.append(trajectory_idswitch_reliability)
+                    trajectory_idswitch_reliability = 0
+                else:
+                    trajectory_iou_list.append(iou_similarity)
 
             if split_each_track_valid_mask[track_id][idx] == 1:
                 trajectory_idswitch_reliability += 1
 
             bbox_pre = copy.deepcopy(bbox)
+            #velocity_x_pre = copy.deepcopy(velocity_x)
+            #velocity_y_pre = copy.deepcopy(velocity_y)
 
             confidence_score = mapping_node_id_to_bbox[node_id][1]
             if confidence_score > confidence_score_max:
                 confidence_score_max = confidence_score
                 node_id_max = node_id
-            mapping_frameid_to_human_centers[int(frame_id.split('.')[0])] = [(bbox[0][0] + bbox[1][0]) / 2,
-                                                                             (bbox[0][1] + bbox[1][1]) / 2]  # 同一帧中图片相连?
+
             mapping_frameid_to_bbox[frame_id] = bbox
             # mapping_frameid_to_bbox[frame_id] = [bbox,confidence_score]
             mapping_frameid_to_confidence_score[frame_id] = confidence_score
@@ -579,6 +593,25 @@ def split_each_frame_permutations(each_frame_permutations, branch_frame_key,mapp
 
     return each_frame_permutations_candidates
 
+
+def cluster_data(indefinite_node,mapping_node_id_to_features,mapping_node_id_to_bbox):
+    reid_matrix = np.array([np.array(mapping_node_id_to_features[x]) for x in
+                            indefinite_node])  # each row is a person reid feature eg:(49,512)
+    scaler = StandardScaler()
+    normed_reid_data = scaler.fit_transform(reid_matrix)
+    bbox_matrix = np.array([np.array(mapping_node_id_to_bbox[x][0]).flatten() for x in
+                            indefinite_node])  # each row is a person bbox information eg:(49,4)
+    scaler_bbox = StandardScaler()
+    normed_bbox_data = scaler_bbox.fit_transform(bbox_matrix)
+    pca = PCA(n_components=4)
+    reid_pca = pca.fit_transform(normed_reid_data)
+    # print('dimension after PCA',reid_pca.shape[1])
+    unique_frame_list = sorted(np.unique([mapping_node_id_to_bbox[x][2] for x in mapping_node_id_to_bbox]))
+    index_matrix = np.ones(tracklet_len) - np.eye(tracklet_len)
+    time_matrix = np.array([int(mapping_node_id_to_bbox[x][2].split('.')[0]) for x in indefinite_node]).reshape(-1,1)  # frame number(int)
+    data = np.concatenate((reid_pca, bbox_matrix, time_matrix),axis=1)  # each node feature is compose of reid,bbox and time
+    return data
+
 def cluster_fix(result, mapping_edge_id_to_cost, mapping_node_id_to_bbox, mapping_node_id_to_features, device, source,tracklet_len):
     global batch_id
     # global tracklet_len
@@ -637,24 +670,32 @@ def cluster_fix(result, mapping_edge_id_to_cost, mapping_node_id_to_bbox, mappin
                                          source.split('/')[-1] + '_single_results/'))
             cv2.imwrite(os.path.join(source.split(source.split('/')[-1])[0], 'results_all',
                                      source.split('/')[-1] + '_single_results/') + frame_name, curr_img)
+        return tracks
+    single_node_tracks = show_single_tracks(current_video_segment_predicted_tracks_bboxes_test_SSP)
 
-    show_single_tracks(current_video_segment_predicted_tracks_bboxes_test_SSP)
-    
-    
     ##### start clustering for the remained indefinite nodes ######
     total_nodes = list(mapping_node_id_to_bbox.keys())  # all detection nodes
     definite_node = []  # definite belonging nodes
     remained_tracks = list(trajectory_idswitch_reliability_dict.keys())  # remained track id
     cnt0 = 0
+    occluding_track_list = []
     for track in trajectory_idswitch_reliability_dict:
         #if trajectory_idswitch_reliability_dict[track][0] == tracklet_len:  # if the tracklet is complete and has no idswitch
         # if len(trajectory_idswitch_reliability_dict[track])==1 and trajectory_idswitch_reliability_dict[track][0]>=2:
         if len(trajectory_idswitch_reliability_dict[track]) == 1:
             remained_tracks.remove(track)
             definite_node += trajectory_node_dict[track]
-        elif trajectory_idswitch_reliability_dict[track][0] == tracklet_len - 1:
+        elif len(trajectory_idswitch_reliability_dict[track]) == 2: # occluding one and occluded one
+            occluding_track_list.append(track)
             remained_tracks.remove(track)
-            definite_node += trajectory_node_dict[track][:-1]
+            cnt0 += 1
+            if trajectory_idswitch_reliability_dict[track][0]>5:
+                definite_node += trajectory_node_dict[track][:trajectory_idswitch_reliability_dict[track][0]]
+            else:
+                definite_node += trajectory_node_dict[track][trajectory_idswitch_reliability_dict[track][0]:]
+        # elif trajectory_idswitch_reliability_dict[track][0] == tracklet_len - 1:
+        #     remained_tracks.remove(track)
+        #     definite_node += trajectory_node_dict[track][:-1]
         # elif trajectory_idswitch_reliability_dict[]
     indefinite_node = list(set(total_nodes) - set(definite_node))  # indefinite belong node
     statistic_information_dict = {'aspect ratio': [0.51, 6.24], 'width': [33, 165], 'height': [34, 284]}
@@ -680,21 +721,8 @@ def cluster_fix(result, mapping_edge_id_to_cost, mapping_node_id_to_bbox, mappin
     # cnt = [1 for track in remained_tracks if sum(trajectory_idswitch_reliability_dict[track]) >= tracklet_len]
     cnt = [1 for track in current_video_segment_predicted_tracks_bboxes_test_SSP if len(current_video_segment_predicted_tracks_bboxes_test_SSP[track]) > tracklet_len]
     n_clusters += sum(cnt)
-    reid_matrix = np.array([np.array(mapping_node_id_to_features[x]) for x in
-                            indefinite_node])  # each row is a person reid feature eg:(49,512)
-    scaler = StandardScaler()
-    normed_reid_data = scaler.fit_transform(reid_matrix)
-    bbox_matrix = np.array([np.array(mapping_node_id_to_bbox[x][0]).flatten() for x in
-                            indefinite_node])  # each row is a person bbox information eg:(49,4)
-    scaler_bbox = StandardScaler()
-    normed_bbox_data = scaler_bbox.fit_transform(bbox_matrix)
-    pca = PCA(n_components=5)
-    reid_pca = pca.fit_transform(normed_reid_data)
-    # print('dimension after PCA',reid_pca.shape[1])
-    unique_frame_list = sorted(np.unique([mapping_node_id_to_bbox[x][2] for x in mapping_node_id_to_bbox]))
-    index_matrix = np.ones(tracklet_len) - np.eye(tracklet_len)
-    time_matrix = np.array([int(mapping_node_id_to_bbox[x][2].split('.')[0]) for x in indefinite_node]).reshape(-1,1)  # frame number(int)
-    data = np.concatenate((reid_pca, bbox_matrix, time_matrix),axis=1)  # each node feature is compose of reid,bbox and time
+
+    data = cluster_data(indefinite_node,mapping_node_id_to_features,mapping_node_id_to_bbox)
     # the KMeans using sklearn cannot use self-defined distance matrix
     # cluster = KMeans(n_clusters=n_clusters,random_state=0).fit(data)
     # centroid = cluster.cluster_centers_
@@ -735,7 +763,7 @@ def cluster_fix(result, mapping_edge_id_to_cost, mapping_node_id_to_bbox, mappin
     kmedoids_instance.process()
 
     clusters = kmedoids_instance.get_clusters()
-    kmedoids_medoids = kmedoids_instance.get_medoids()
+    # kmedoids_medoids = kmedoids_instance.get_medoids()
     # initial_centers = kmeans_plusplus_initializer(sample, n_clusters).initialize()
     # kmeans_instance = kmeans(sample, initial_centers, metric=my_metric)
     # # 5. Run cluster analysis and obtain results.
@@ -782,7 +810,10 @@ def cluster_fix(result, mapping_edge_id_to_cost, mapping_node_id_to_bbox, mappin
     # kmeans_visualizer.show_clusters(sample, clusters, final_centers)
     ##### 整理结果并且返回 #####
     split_each_track_refined = {}
-    for track_id in np.unique(list(split_each_track.keys()) + list(cluster_tracks.keys())).tolist():
+    # final_track_list = list(set(split_each_track.keys()-set(single_node_tracks.keys())-set(cluster_tracks.keys())).union(set([track for track in list(cluster_tracks.keys()) if len(cluster_tracks[track]) != 1])))
+    # final_track_list = [track for track in list(split_each_track.keys()) if len(split_each_track[track]) != 1] + [track for track in list(cluster_tracks.keys()) if len(cluster_tracks[track]) != 1]
+    final_track_list = np.unique(list(split_each_track.keys()) + list(cluster_tracks.keys())).tolist()
+    for track_id in final_track_list:
         # if trajectory_idswitch_reliability_dict[track_id][0] == tracklet_len:
         if track_id not in list(cluster_tracks.keys()):
             split_each_track_refined[track_id] = copy.deepcopy(split_each_track[track_id])
@@ -791,11 +822,17 @@ def cluster_fix(result, mapping_edge_id_to_cost, mapping_node_id_to_bbox, mappin
                 if track_id not in split_each_track_refined:
                     split_each_track_refined[track_id] = []
                 split_each_track_refined[track_id].append([str(2 * node_to_add - 1), str(2 * node_to_add)])
-
+    delete_list = []
     for split_each_track_refined_key in split_each_track_refined:
-        split_each_track_refined[split_each_track_refined_key] = interpolate_to_obtain_traj(
-            split_each_track_refined[split_each_track_refined_key])  # 插入节点之间的连边形成轨迹
+        if len(split_each_track_refined[split_each_track_refined_key])>1: # 取消掉长度小于1的轨迹
+            split_each_track_refined[split_each_track_refined_key] = interpolate_to_obtain_traj(
+                split_each_track_refined[split_each_track_refined_key])  # 插入节点之间的连边形成轨迹
+        else:
+            # del split_each_track_refined[split_each_track_refined_key]
+            delete_list.append(split_each_track_refined_key)
+            continue
     # del split_each_track_refined[0] 没有必要
+    [split_each_track_refined.pop(track) for track in delete_list]
     result[0] = 'Predicted tracks' + '\n' + convert_dict_to_str(result, split_each_track_refined)
     return result
 
