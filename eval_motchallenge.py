@@ -53,8 +53,8 @@ Sequences of ground truth and test will be matched according to the `<SEQUENCE_X
 string.""", formatter_class=argparse.RawTextHelpFormatter)
 # /home/allenyljiang/Documents/Dataset/MOT16/train/MOT16-02/results_all/track.txt
 # /home/allenyljiang/Documents/Dataset/MOT16/train/MOT16-02/gt/gt.txt
-    parser.add_argument('--groundtruths',type=str, help='Directory containing ground truth files.',default='/home/allenyljiang/Documents/Dataset/MOT16/train/')
-    parser.add_argument('--tests',type=str, help='Directory containing tracker result files',default='/home/allenyljiang/Documents/Dataset/MOT16/train/MOT16-02/results_all/track.txt')
+    parser.add_argument('--groundtruths',type=str, help='Directory containing ground truth files.',default='/home/allenyljiang/Documents/TrackEval-master/data/gt/mot_challenge/MOT20-train')
+    parser.add_argument('--tests',type=str, help='Directory containing tracker result files',default='/home/allenyljiang/Documents/Dataset/MOT20/train/MOT_train')
     parser.add_argument('--loglevel', type=str, help='Log level', default='info')
     parser.add_argument('--fmt', type=str, help='Data format', default='mot15-2D')
     parser.add_argument('--solver', type=str, help='LAP solver to use for matching between frames.')

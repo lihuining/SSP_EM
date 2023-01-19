@@ -616,6 +616,9 @@ def cluster_fix(result, mapping_edge_id_to_cost, mapping_node_id_to_bbox, mappin
             remained_tracks.remove(track)
             definite_node += trajectory_node_dict[track]
     indefinite_node = list(set(total_nodes) - set(definite_node))
+    if len(indefinite_node) == 0:
+        result[0] = 'Predicted tracks' + '\n' + convert_dict_to_str(result, split_each_track)
+        return result
     indefinite_node.sort()
     n_clusters = len(remained_tracks)
     reid_matrix = np.array([np.array(mapping_node_id_to_features[x]) for x in indefinite_node])  # (49.512)
@@ -629,9 +632,13 @@ def cluster_fix(result, mapping_edge_id_to_cost, mapping_node_id_to_bbox, mappin
     explaned_variance = pca.explained_variance_ratio_
     explaned_variance_sum = np.cumsum(explaned_variance)
     bbox_matrix = np.array([np.array(mapping_node_id_to_bbox[x][0]).flatten() for x in indefinite_node])
+    width = bbox_matrix[:,2] - bbox_matrix[:,0]
+    height = bbox_matrix[:,3] - bbox_matrix[:,1]
+    aspect_ratio = 10*(width / height).reshape(-1, 1)
+    area = (width * height).reshape(-1, 1)/100
     scaler_bbox = StandardScaler()
     normed_bbox_data = scaler_bbox.fit_transform(bbox_matrix)
-    pca = PCA(n_components=5)
+    pca = PCA(n_components=4)
     reid_pca = pca.fit_transform(normed_reid_data)
     unique_frame_list = sorted(np.unique([mapping_node_id_to_bbox[x][2] for x in mapping_node_id_to_bbox]))
     index_matrix = np.ones(tracklet_len) - np.eye(tracklet_len)
@@ -643,7 +650,8 @@ def cluster_fix(result, mapping_edge_id_to_cost, mapping_node_id_to_bbox, mappin
     #             time_matrix[i,j] = 0
     # time_matrix = np.array([index_matrix[unique_frame_list.index(mapping_node_id_to_bbox[x][2]),:] for x in indefinite_node]) # (49*49)
     time_matrix = np.array([int(mapping_node_id_to_bbox[x][2].split('.')[0]) for x in indefinite_node]).reshape(-1, 1)
-    data = np.concatenate((reid_pca, bbox_matrix, time_matrix), axis=1)
+
+    data = np.concatenate((reid_pca, bbox_matrix, time_matrix,aspect_ratio,area), axis=1)
     cluster = KMeans(n_clusters=n_clusters, random_state=0).fit(data)
     # centroid = cluster.cluster_centers_
     # y_pred = cluster.labels_
@@ -683,7 +691,7 @@ def cluster_fix(result, mapping_edge_id_to_cost, mapping_node_id_to_bbox, mappin
             mapping_dict[indefinite_node[node]] = mapping_node_id_to_bbox[indefinite_node[node]]
         cluster_tracks[remained_tracks[idx]] = mapping_dict
     # 6. Visualize obtained results
-    source = '/home/allenyljiang/Documents/Dataset/MOT20/train/MOT20-01/img1'
+    # source = '/home/allenyljiang/Documents/Dataset/MOT20/train/MOT20-01/img1'
     def getDictKey_1(myDict, value):
         return [k for k, v in myDict.items() if value in list(v.keys())][0]
     def show_clusters(cluster_tracks):
@@ -746,7 +754,7 @@ def cluster_fix(result, mapping_edge_id_to_cost, mapping_node_id_to_bbox, mappin
     
     for split_each_track_refined_key in split_each_track_refined:
         mean_score = np.mean([mapping_node_id_to_bbox[int(node_pair[1]) / 2][1] for node_pair in split_each_track_refined[split_each_track_refined_key] if int(node_pair[1]) % 2 == 0])
-        print(split_each_track_refined_key,'mean confidece',mean_score,'length',(len(split_each_track_refined[split_each_track_refined_key])+1)/2)
+        #print(split_each_track_refined_key,'mean confidece',mean_score,'length',(len(split_each_track_refined[split_each_track_refined_key])+1)/2)
         if len(split_each_track_refined[split_each_track_refined_key]) <= 1 or mean_score*math.sqrt((len(split_each_track_refined[split_each_track_refined_key])+1)/2)<1.75: # 取消掉长度小于1的轨迹
             delete_list.append(split_each_track_refined_key)
     # del split_each_track_refined[0] 没有必要
@@ -840,7 +848,7 @@ def BO_fix_Thompson_sampling(result, mapping_edge_id_to_cost, mapping_node_id_to
     indefinite_node = list(set(total_nodes) - set(definite_node))
     indefinite_node.sort()
     n_clusters = len(remained_tracks)
-    cnt = [1 for track in current_video_segment_predicted_tracks_bboxes_test_SSP if len(current_video_segment_predicted_tracks_bboxes_test_SSP[track]) > tracklet_len]
+    cnt = [int(len(current_video_segment_predicted_tracks_bboxes_test_SSP[track])/tracklet_len) for track in current_video_segment_predicted_tracks_bboxes_test_SSP if len(current_video_segment_predicted_tracks_bboxes_test_SSP[track]) > tracklet_len]
     n_clusters += sum(cnt)
     reid_matrix = np.array([np.array(mapping_node_id_to_features[x]) for x in indefinite_node])  # (49.512)
     scaler = StandardScaler()
@@ -931,7 +939,7 @@ def BO_fix_Thompson_sampling(result, mapping_edge_id_to_cost, mapping_node_id_to
             cv2.imwrite(os.path.join(source.split(source.split('/')[-1])[0], 'results_all',
                                      source.split('/')[-1] + '_cluster_results/') + frame_name, curr_img)
     # kmeans_visualizer.show_clusters(sample, clusters, final_centers)
-    show_clusters(cluster_tracks)
+    # show_clusters(cluster_tracks)
     ##### 整理结果并且返回 #####
 
     split_each_track_refined = {}

@@ -52,6 +52,7 @@ min_height_list = []
 max_height_list = []
 min_width_list = []
 max_width_list = []
+aspect_ratio_var_list = []
 for track_id in range(len(unique_track_id)): # 每一条轨迹
     # 轨迹名称
     # unique_track_id[track_id]
@@ -77,18 +78,22 @@ for track_id in range(len(unique_track_id)): # 每一条轨迹
     max_width_list.append(np.max(width))
     height = dets[:,3]-dets[:,1]
     aspect_ratio = height/width
+
     min_height_list.append(np.min(height))
     max_height_list.append(np.max(height))
+
     min_aspect_ratio_list.append(np.min(aspect_ratio))
     max_aspect_ratio_list.append(np.max(aspect_ratio))
+    aspect_ratio_var_list.append(np.std(aspect_ratio))
     ### same frame iou information ###
     corresponding_coefficient_matrix = compute_iou_between_bbox_list(dets.reshape(-1, 2, 2), dets.reshape(-1, 2, 2))
     iou_in_same_frame = corresponding_coefficient_matrix - np.diag(np.diagonal(corresponding_coefficient_matrix))
     print(np.max(iou_in_same_frame))
     print(np.mean(iou_in_same_frame))
-    ### iou information ###
+
+    # ### iou information ###
     # y = dets[:,[1,3,0,2]]
-    # for i in range(len(y)-3):
+    # for i in range(len(y)-1):
     #     iou_similarity = compute_iou_single_box(y[i],y[i+3])
     #     iou_similarity_list.append(iou_similarity)
     # print('single mean',np.mean(iou_similarity_list))
@@ -98,6 +103,7 @@ print('min aspect ratio is {},min width is {},min height is {}'.format(np.min(mi
 print('max aspect ratio is {},max width is {},max height is {}'.format(np.max(max_aspect_ratio_list),np.max(max_width_list),np.max(max_height_list)))
 
 # print('mean',np.mean(iou_similarity_list))
+# print('min',np.min(iou_similarity_list))
 # print('variance',np.std(iou_similarity_list))
 
 

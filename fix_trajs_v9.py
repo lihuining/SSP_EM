@@ -102,7 +102,7 @@ def cosine_similarity(vec1,vec2):
 
 def convert_track_to_stitch_format(split_each_track,mapping_node_id_to_bbox,mapping_node_id_to_features,split_each_track_valid_mask):
     iou_thresh = 0.55 # 0.789
-    iou_thresh_step = 0.015
+    iou_thresh_step = 0.013
     curr_predicted_tracks = {}
     curr_predicted_tracks_bboxes = {}
     curr_predicted_tracks_bboxes_test = {} # 测试使用
@@ -146,7 +146,7 @@ def convert_track_to_stitch_format(split_each_track,mapping_node_id_to_bbox,mapp
                 #print(iou_similarity)
                 #velocity_x = (bbox[0][0] + bbox[1][0]) / 2 - (bbox_pre[0][0] + bbox_pre[1][0]) / 2 # x-axis
                 #velocity_y = (bbox[0][1] + bbox[1][1]) / 2 - (bbox_pre[0][1] + bbox_pre[1][1]) / 2 # y-axis
-                iou_thresh_tmp = iou_thresh + (idx-idx_tmp)*iou_thresh_step/2
+                iou_thresh_tmp = iou_thresh + (idx/2-idx_tmp)*iou_thresh_step
                 if iou_similarity < iou_thresh_tmp:
                         #or (np.sign(velocity_x*velocity_x_pre)+np.sign(velocity_y*velocity_y_pre)) == -2:
                     print(track_id,idx,iou_similarity)

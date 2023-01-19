@@ -137,7 +137,7 @@ median_filter_radius = 4
 num_samples_around_each_joint = 3
 maximum_possible_number = math.exp(10)
 average_sampling_density_hori_vert = 7
-bbox_confidence_threshold = 0.7 #5 # 0.45
+bbox_confidence_threshold = 0.73 #5 # 0.45
 head_bbox_confidence_threshold = 0.55 # 0.6 # 0.45
 temporal_length_thresh_inside_tracklet = 5
 tracklet_confidence_threshold = 0.6
@@ -163,6 +163,7 @@ skeletons = [[15, 13], [13, 11], [16, 14], [14, 12], [11, 12], [5, 11], [6, 12],
 batch_stride = tracklet_len
 batch_stride_write = tracklet_len - 1
 det_cnt = 0 # counting the number of detections
+det_cnt_frame_list = []
 foreign_matter_cls_id_dict = {
 'bicycle': 1,
 'motorcycle': 3,
@@ -612,6 +613,7 @@ def conduct_pose_estimation(webcam, path, out, im0s, pred, img, dataset, save_tx
     # tracklet_inner_cnt - index of frame
     # pose_model, pose_transform - model for pose estimation
     global det_cnt
+    global det_cnt_frame_list
     for i, det in enumerate(pred):  # detections per image
         if webcam:  # batch_size >= 1
             p, s, im0 = path[i], '%g: ' % i, im0s[i].copy()
@@ -758,11 +760,12 @@ def conduct_pose_estimation(webcam, path, out, im0s, pred, img, dataset, save_tx
     tracklet_pose_collection_tmp['foreignmatter_box_confidence_scores'] = []
     tracklet_pose_collection.append(tracklet_pose_collection_tmp)
     img = cv2.imread(path)
-    if not os.path.exists(os.path.join('/home/allenyljiang/Documents/Dataset/MOT20/train/MOT20-01/'+ 'detect'+str(bbox_confidence_threshold)+'/')):
-        os.makedirs(os.path.join('/home/allenyljiang/Documents/Dataset/MOT20/train/MOT20-01/'+ 'detect'+str(bbox_confidence_threshold)+'/'))
-    dstfile = os.path.join('/home/allenyljiang/Documents/Dataset/MOT20/train/MOT20-01/'+ 'detect'+str(bbox_confidence_threshold)+'/'+ path.split('/')[-1])
+    if not os.path.exists(os.path.join(os.path.dirname(path)[:-4]+ 'detect'+str(bbox_confidence_threshold)+'/')):
+        os.makedirs(os.path.join(os.path.dirname(path)[:-4]+ 'detect'+str(bbox_confidence_threshold)+'/'))
+    dstfile = os.path.join(os.path.dirname(path)[:-4]+ 'detect'+str(bbox_confidence_threshold)+'/'+ path.split('/')[-1])
     # dstfile = path.split('.jpg')[0] + '_detect.jpg'
     print(len(box_detected))
+    det_cnt_frame_list.append(len(box_detected))
     det_cnt += len(box_detected)
     for idx,bbox in enumerate(box_detected):
         cv2.rectangle(img,(int(bbox[0][0]),int(bbox[0][1])),(int(bbox[1][0]),int(bbox[1][1])),(0,255,0),2)
@@ -2390,6 +2393,13 @@ def detect(opt,exp, need_face_recognition_switch = 0, face_verification_thresh =
     mini_keys = []
     anomaly_detection_median_filter = {}
     most_updated_json_idx = 0
+    # start_file = 200
+    # dataset.files = dataset.files[start_file:]
+    # dataset.video_flag = dataset.video_flag[start_file:]
+    dataset.nf = 100
+    start_file = len(dataset.files) - dataset.nf
+    dataset.files = dataset.files[start_file:]
+    dataset.video_flag = dataset.video_flag[start_file:]
 
     # dataset.files = dataset.files[12:]
     # dataset.video_flag = dataset.video_flag[12:]
@@ -2426,7 +2436,7 @@ def detect(opt,exp, need_face_recognition_switch = 0, face_verification_thresh =
         pred = model(img) # (1,10710,6)
         num_classes = 1
         confthre = 0.01
-        nmsthre = 0.5
+        nmsthre = 0.7
         pred = postprocess(pred, num_classes, confthre, nmsthre)  # the class is 0
         # Apply NMS
         # pred = non_max_suppression(pred, opt['conf_thres'], opt['iou_thres'], classes=opt['classes'], agnostic=opt['agnostic_nms'])
@@ -2507,7 +2517,7 @@ def parse_opt():
     parser = argparse.ArgumentParser()#　照片要jpg格式
     # /usr/local/SSP_EM/05_0019
     # /home/allenyljiang/Documents/Dataset/MOT20/train/MOT20-01/img1
-    parser.add_argument('--source', type=str, default='/home/allenyljiang/Documents/Dataset/MOT20/train/MOT20-01/img_test', help='file/dir/URL/glob, 0 for webcam')#/media/allenyljiang/Seagate_Backup_Plus_Drive/usr/local/VIBE-master/data/neurocomputing/05_0019
+    parser.add_argument('--source', type=str, default='/home/allenyljiang/Documents/Dataset/MOT20/test/MOT20-08/img1', help='file/dir/URL/glob, 0 for webcam')#/media/allenyljiang/Seagate_Backup_Plus_Drive/usr/local/VIBE-master/data/neurocomputing/05_0019
 
     opt = parser.parse_args()
     return opt
@@ -2556,6 +2566,14 @@ if __name__ == '__main__':
     exp = get_exp(args.exp_file, args.name)# 模型参数（键值对形式）
     detect(opt,exp,args)
     print(det_cnt)
+    plt.figure()
+    plt.plot(det_cnt_frame_list)
+
+    folder = opt['source'].split('/')[-2] # 'MOT20-08'
+    plt.savefig(folder+'_bbox_thresh'+str(bbox_confidence_threshold)+'nms0.7.jpg')
+    f = open(folder + "_bytetrack_det.txt", "w")
+    f.write(str(det_cnt_frame_list))
+    f.close()
     #snapshot = tracemalloc.take_snapshot()
     # tracemalloc_snapshot(snapshot)
     # snapshot = tracemalloc.take_snapshot() #  快照,当前内存分配

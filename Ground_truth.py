@@ -7,19 +7,21 @@ import cv2
 import numpy as np
 from MOT_demo_v14_based_on_reid_v22_notstandard_yolov5_add_face_remove_skeleton_ref_v4 import compute_iou_single_box,compute_iou_between_bbox_list
 import matplotlib.pyplot as plt
-gt_txt = '/home/allenyljiang/Documents/Dataset/MOT20/train/MOT20-01/gt/gt.txt'
-img_list = '/home/allenyljiang/Documents/Dataset/MOT20/train/MOT20-01/img1'
+folder = 'MOT20-01'
+gt_txt =  os.path.join('/home/allenyljiang/Documents/Dataset/MOT20/train',folder,'gt/gt.txt') # 前后不需要加/
+# 存在以‘’/’’开始的参数，从最后一个以”/”开头的参数开始拼接，之前的参数全部丢弃。
+img_list = os.path.join('/home/allenyljiang/Documents/Dataset/MOT20/train',folder,'img1')
 img_blob = sorted(os.listdir(img_list))
 seq_tracks = np.loadtxt(gt_txt,delimiter=',') # 注意加上delimiter
 seq_tracks_valid_part3 = seq_tracks[seq_tracks[:,-2] == 7,:] # static_person
-seq_tracks = seq_tracks[seq_tracks[:,-3] == 1,:]
+seq_tracks = seq_tracks[seq_tracks[:,-3] == 1,:] # pedestrain
 classes = np.unique(seq_tracks[:,-2]) # the considered classes in gt
 # seq_tracks_valid_part1 = seq_tracks[seq_tracks[:,-2] == 1,:] # pedestrain
 # seq_tracks_valid_part2 = seq_tracks[seq_tracks[:,-2] == 2,:]
 # seq_tracks_valid_part3 = seq_tracks[seq_tracks[:,-2] == 7,:] # static_person
 # seq_tracks = np.concatenate((seq_tracks_valid_part1,seq_tracks_valid_part2,seq_tracks_valid_part3),axis=0)
 
-dst_path = os.path.join('/home/allenyljiang/Documents/Dataset/MOT20/train/MOT20-01/gt/vis')
+dst_path = os.path.join('/home/allenyljiang/Documents/Dataset/MOT20/train',folder,'gt/vis')
 if not os.path.exists(dst_path):
     os.makedirs(dst_path)
 
@@ -42,12 +44,21 @@ for frame in range(int(seq_tracks[:,0].max())):
     # print(np.where(iou_in_same_frame == np.max(iou_in_same_frame)))
     for i in range(len(track_id)):
         left,top = int(dets[i,0]),int(dets[i,1])
-        # cv2.putText(img, str(int(track_id[i])), (left, top), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 255, 0), 3)
-        cv2.rectangle(img,(int(dets[i,0]),int(dets[i,1])),(int(dets[i,2]),int(dets[i,3])),(0,255,0),3)
+        # cv2.putText(img, str(int(track_id[i])), (left, top), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 255, 0), 1)
+        cv2.rectangle(img,(int(dets[i,0]),int(dets[i,1])),(int(dets[i,2]),int(dets[i,3])),(0,255,0),1)
         # ax1.imshow(img)
         # plt.imshow(img)
         # plt.show(img)
     cv2.imwrite(img_dst,img)
 print(num_person_per_frame)
-print(np.mean(num_person_per_frame))
+f = open(folder+".txt", "w")
+f.write(str(num_person_per_frame))
+f.close()
+print('mean',np.mean(num_person_per_frame),'min',min(num_person_per_frame),'max',max(num_person_per_frame))
+print('std',np.std(num_person_per_frame))
+plt.figure()
+plt.plot(list(range(len(num_person_per_frame))),num_person_per_frame)
+plt.show()
+plt.title('The numbers of person per frame')
+plt.savefig(folder+'fig.png')
 print('max_iou_between_people = {}'.format(np.max(max_iou_between_people)))
