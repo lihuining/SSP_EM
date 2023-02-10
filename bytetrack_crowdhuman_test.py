@@ -137,7 +137,7 @@ median_filter_radius = 4
 num_samples_around_each_joint = 3
 maximum_possible_number = math.exp(10)
 average_sampling_density_hori_vert = 7
-bbox_confidence_threshold = 0.73 #5 # 0.45
+bbox_confidence_threshold = 0.1 #5 # 0.45
 head_bbox_confidence_threshold = 0.55 # 0.6 # 0.45
 temporal_length_thresh_inside_tracklet = 5
 tracklet_confidence_threshold = 0.6
@@ -163,6 +163,7 @@ skeletons = [[15, 13], [13, 11], [16, 14], [14, 12], [11, 12], [5, 11], [6, 12],
 batch_stride = tracklet_len
 batch_stride_write = tracklet_len - 1
 det_cnt = 0 # counting the number of detections
+frame_cnt = 0
 det_cnt_frame_list = []
 foreign_matter_cls_id_dict = {
 'bicycle': 1,
@@ -613,6 +614,7 @@ def conduct_pose_estimation(webcam, path, out, im0s, pred, img, dataset, save_tx
     # tracklet_inner_cnt - index of frame
     # pose_model, pose_transform - model for pose estimation
     global det_cnt
+    global frame_cnt
     global det_cnt_frame_list
     for i, det in enumerate(pred):  # detections per image
         if webcam:  # batch_size >= 1
@@ -760,14 +762,16 @@ def conduct_pose_estimation(webcam, path, out, im0s, pred, img, dataset, save_tx
     tracklet_pose_collection_tmp['foreignmatter_box_confidence_scores'] = []
     tracklet_pose_collection.append(tracklet_pose_collection_tmp)
     img = cv2.imread(path)
-    if not os.path.exists(os.path.join(os.path.dirname(path)[:-4]+ 'detect'+str(bbox_confidence_threshold)+'/')):
-        os.makedirs(os.path.join(os.path.dirname(path)[:-4]+ 'detect'+str(bbox_confidence_threshold)+'/'))
-    dstfile = os.path.join(os.path.dirname(path)[:-4]+ 'detect'+str(bbox_confidence_threshold)+'/'+ path.split('/')[-1])
+    if not os.path.exists(os.path.join(os.path.dirname(path)[:-4]+ 'detect'+str(bbox_confidence_threshold)+'nms'+ str(nms_thresh)+'/')):
+        os.makedirs(os.path.join(os.path.dirname(path)[:-4]+ 'detect'+str(bbox_confidence_threshold)+'nms'+ str(nms_thresh)+'/'))
+    dstfile = os.path.join(os.path.dirname(path)[:-4]+ 'detect'+str(bbox_confidence_threshold)+'nms'+ str(nms_thresh)+'/'+ path.split('/')[-1])
     # dstfile = path.split('.jpg')[0] + '_detect.jpg'
     print(len(box_detected))
     det_cnt_frame_list.append(len(box_detected))
     det_cnt += len(box_detected)
     for idx,bbox in enumerate(box_detected):
+        if box_confidence_scores[idx] > 0.7:
+            continue
         cv2.rectangle(img,(int(bbox[0][0]),int(bbox[0][1])),(int(bbox[1][0]),int(bbox[1][1])),(0,255,0),2)
         cv2.putText(img,str(round(box_confidence_scores[idx],2)),(int((int(bbox[0][0])+int(bbox[1][0]))/2),int((int(bbox[0][1])+int(bbox[1][1]))/2)),cv2.FONT_HERSHEY_SIMPLEX,1,(0,0,255),2)
     cv2.imwrite(dstfile,img)
@@ -2263,7 +2267,7 @@ def detect(opt,exp, need_face_recognition_switch = 0, face_verification_thresh =
     global current_video_segment_representative_frames_backup
     global current_video_segment_all_traj_all_object_features_backup
     global stitching_tracklets_dict
-    global batch_id,batch_stride,batch_stride_write,det_cnt
+    global batch_id,batch_stride,batch_stride_write,det_cnt,frame_cnt
     global frame_width
     global frame_height
     global tracklet_len
@@ -2393,13 +2397,22 @@ def detect(opt,exp, need_face_recognition_switch = 0, face_verification_thresh =
     mini_keys = []
     anomaly_detection_median_filter = {}
     most_updated_json_idx = 0
-    # start_file = 200
-    # dataset.files = dataset.files[start_file:]
-    # dataset.video_flag = dataset.video_flag[start_file:]
+
     dataset.nf = 100
     start_file = len(dataset.files) - dataset.nf
-    dataset.files = dataset.files[start_file:]
-    dataset.video_flag = dataset.video_flag[start_file:]
+    # dataset.files = dataset.files[start_file:]
+    ## 选取前 50 frames
+    dataset.files = dataset.files[:start_file]
+    dataset.video_flag = dataset.video_flag[:start_file]
+    frame_cnt = dataset.nf
+
+    # dataset.nf = 400
+    # start_file = len(dataset.files) - dataset.nf
+    # # dataset.files = dataset.files[start_file:]
+    # ## 选取前 50 frames
+    # dataset.files = dataset.files[1700:2100]
+    # dataset.video_flag = dataset.video_flag[1700:2100]
+    # frame_cnt = dataset.nf
 
     # dataset.files = dataset.files[12:]
     # dataset.video_flag = dataset.video_flag[12:]
@@ -2466,7 +2479,7 @@ def detect(opt,exp, need_face_recognition_switch = 0, face_verification_thresh =
         #     tracklet_inner_cnt = len(tracklet_pose_collection)
         # 使用自带detector
         # 每次只保存当前batch的结果
-        tracklet_pose_collection = conduct_pose_estimation(webcam, path, out, im0s, pred, img, dataset, save_txt, save_img, view_img, box_detected, head_box_detected, foreignmatter_box_detected, box_confidence_scores, head_box_confidence_scores, foreignmatter_box_confidence_scores, centers, scales, vid_path, vid_writer, vid_cap, tracklet_pose_collection, names, colors, pose_transform, bbox_confidence_threshold, tracklet_inner_cnt, need_face_recognition_switch, face_verification_thresh, opt['iou_thres'])
+        tracklet_pose_collection = conduct_pose_estimation(webcam, path, out, im0s, pred, img, dataset, save_txt, save_img, view_img, box_detected, head_box_detected, foreignmatter_box_detected, box_confidence_scores, head_box_confidence_scores, foreignmatter_box_confidence_scores, centers, scales, vid_path, vid_writer, vid_cap, tracklet_pose_collection, names, colors, pose_transform, bbox_confidence_threshold, tracklet_inner_cnt, need_face_recognition_switch, face_verification_thresh, nmsthre)
         # tracklet_pose_collection_tmp = json.loads(det.readline())
         # tracklet_pose_collection.append(tracklet_pose_collection_tmp)
         if total_frames <= tracklet_len: # 不足一个batch
@@ -2565,13 +2578,13 @@ if __name__ == '__main__':
     args = make_parser().parse_args()#解析参数
     exp = get_exp(args.exp_file, args.name)# 模型参数（键值对形式）
     detect(opt,exp,args)
-    print(det_cnt)
+    print('total_det:{0},average_det:{1}'.format(det_cnt,det_cnt/frame_cnt))
     plt.figure()
     plt.plot(det_cnt_frame_list)
 
     folder = opt['source'].split('/')[-2] # 'MOT20-08'
     plt.savefig(folder+'_bbox_thresh'+str(bbox_confidence_threshold)+'nms0.7.jpg')
-    f = open(folder + "_bytetrack_det.txt", "w")
+    f = open(folder + '_bbox_thresh'+str(bbox_confidence_threshold)+"_bytetrack_det.txt", "w")
     f.write(str(det_cnt_frame_list))
     f.close()
     #snapshot = tracemalloc.take_snapshot()

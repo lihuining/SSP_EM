@@ -21,7 +21,7 @@ classes = np.unique(seq_tracks[:,-2]) # the considered classes in gt
 # seq_tracks_valid_part3 = seq_tracks[seq_tracks[:,-2] == 7,:] # static_person
 # seq_tracks = np.concatenate((seq_tracks_valid_part1,seq_tracks_valid_part2,seq_tracks_valid_part3),axis=0)
 
-dst_path = os.path.join('/home/allenyljiang/Documents/Dataset/MOT20/train',folder,'gt/vis')
+dst_path = os.path.join('/home/allenyljiang/Documents/Dataset/MOT20/train',folder,'gt/vis_ratio')
 if not os.path.exists(dst_path):
     os.makedirs(dst_path)
 
@@ -36,6 +36,12 @@ for frame in range(int(seq_tracks[:,0].max())):
     track_id = seq_tracks[seq_tracks[:,0] == frame,1] # 轨迹id
     dets = seq_tracks[seq_tracks[:,0] == frame,2:6] # 检测框
     dets[:,2:4]+=dets[:,0:2]
+    ## 对框进行缩放 ## 
+    center_x, center_y = (dets[:,0] + dets[:,2]) / 2, (dets[:,1] + dets[:,3]) / 2
+    ratio = 0.8
+    width, height = (np.array(dets[:,2] - dets[:,0])*ratio), np.array((dets[:,3] - dets[:,1]))
+    left, right, top, bottom = (center_x - width / 2), (center_x + width / 2), (center_y - height / 2), (center_y + height / 2)
+    
     num_person_per_frame.append(len(dets))
     corresponding_coefficient_matrix = compute_iou_between_bbox_list(dets.reshape(-1,2,2),dets.reshape(-1,2,2))
     iou_in_same_frame = corresponding_coefficient_matrix - np.diag(np.diagonal(corresponding_coefficient_matrix)) # 同一帧当中不同人的iou相似度
@@ -43,9 +49,11 @@ for frame in range(int(seq_tracks[:,0].max())):
     max_iou_between_people.append(np.max(iou_in_same_frame))
     # print(np.where(iou_in_same_frame == np.max(iou_in_same_frame)))
     for i in range(len(track_id)):
-        left,top = int(dets[i,0]),int(dets[i,1])
+        # left,top = int(dets[i,0]),int(dets[i,1])
         # cv2.putText(img, str(int(track_id[i])), (left, top), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 255, 0), 1)
-        cv2.rectangle(img,(int(dets[i,0]),int(dets[i,1])),(int(dets[i,2]),int(dets[i,3])),(0,255,0),1)
+        # cv2.rectangle(img,(int(dets[i,0]),int(dets[i,1])),(int(dets[i,2]),int(dets[i,3])),(0,255,0),1)
+        cv2.rectangle(img,(int(left[i]),int(top[i])),(int(right[i]),int(bottom[i])),(0,255,0),1)
+
         # ax1.imshow(img)
         # plt.imshow(img)
         # plt.show(img)
