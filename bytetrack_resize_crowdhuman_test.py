@@ -71,6 +71,20 @@ from sklearn import metrics
 # from ab_det_realtime.ab_detect_utils import *
 from tkinter import *
 from itertools import permutations
+##### yolox #####
+
+from yolox.core import launch
+from yolox.exp import get_exp
+from yolox.utils import configure_nccl, fuse_model, get_local_rank, get_model_info, setup_logger
+from yolox.evaluators import MOTEvaluator
+from yolox.utils import (
+    gather,
+    is_main_process,
+    postprocess,
+    synchronize,
+    time_synchronized,
+    xyxy2xywh
+)
 #################################################### detector related import start ######################################################################
 import torch
 import torchvision
@@ -123,7 +137,7 @@ median_filter_radius = 4
 num_samples_around_each_joint = 3
 maximum_possible_number = math.exp(10)
 average_sampling_density_hori_vert = 7
-bbox_confidence_threshold = 0.4 #5 # 0.45
+bbox_confidence_threshold = 0.1 #5 # 0.45
 head_bbox_confidence_threshold = 0.55 # 0.6 # 0.45
 temporal_length_thresh_inside_tracklet = 5
 tracklet_confidence_threshold = 0.6
@@ -146,7 +160,7 @@ batch_id = 0
 frame_height = 0
 frame_width = 0
 skeletons = [[15, 13], [13, 11], [16, 14], [14, 12], [11, 12], [5, 11], [6, 12], [5, 6], [5, 7], [6, 8], [7, 9], [8, 10], [1, 2], [0, 1], [0, 2], [1, 3], [2, 4], [3, 5], [4, 6]]
-batch_stride = tracklet_len 
+batch_stride = tracklet_len
 batch_stride_write = tracklet_len - 1
 det_cnt = 0 # counting the number of detections
 frame_cnt = 0
@@ -160,7 +174,177 @@ foreign_matter_cls_id_dict = {
 # snapshot = tracemalloc.take_snapshot()
 np.warnings.filterwarnings('ignore',category=np.VisibleDeprecationWarning)
 # warnings.filterwarnings('ignore')
+def make_parser():
+    parser = argparse.ArgumentParser("YOLOX Eval")
+    parser.add_argument("-expn", "--experiment-name", type=str, default=None)
+    parser.add_argument("-n", "--name", type=str, default=None, help="model name") # 模型名称
 
+    # distributed
+    parser.add_argument(
+        "--dist-backend", default="nccl", type=str, help="distributed backend"
+    )
+    parser.add_argument(
+        "--dist-url",
+        default=None,
+        type=str,
+        help="url used to set up distributed training",
+    )
+    parser.add_argument("-b", "--batch-size", type=int, default=64, help="batch size") # 批量大小
+    parser.add_argument(
+        "-d", "--devices", default=None, type=int, help="device for training"
+    )
+    # 设备
+    parser.add_argument(
+        "--local_rank", default=0, type=int, help="local rank for dist training"
+    )
+    parser.add_argument(
+        "--num_machines", default=1, type=int, help="num of node for training"
+    )
+    parser.add_argument(
+        "--machine_rank", default=0, type=int, help="node rank for multi-node training"
+    )
+    parser.add_argument(
+        "-f",
+        "--exp_file",
+        default='exps/example/mot/yolox_x_mix_mot20_ch.py.py',
+        type=str,
+        help="pls input your expriment description file",
+    )
+    parser.add_argument(
+        "--fp16",
+        dest="fp16",
+        default=True,
+        # default=False,
+        # action="store_true",
+        help="Adopting mix precision evaluating.",
+    )
+    parser.add_argument(
+        "--fuse",
+        dest="fuse",
+        #default=False,
+        default=True,
+        #action="store_true",
+        help="Fuse conv and bn for testing.",
+    )
+    parser.add_argument(
+        "--trt",
+        dest="trt",
+        default=False,
+        action="store_true",
+        help="Using TensorRT model for testing.",
+    )
+    parser.add_argument(
+        "--test",
+        dest="test",
+        default=False,
+        action="store_true",
+        help="Evaluating on test-dev set.",
+    )
+    parser.add_argument(
+        "--speed",
+        dest="speed",
+        default=False,
+        action="store_true",
+        help="speed test only.",
+    )
+    parser.add_argument(
+        "opts",
+        help="Modify config options using the command-line",
+        default=None,
+        nargs=argparse.REMAINDER,
+    )
+    # det args
+    parser.add_argument("-c", "--ckpt", default='/usr/local/SSP_EM/weights/bytetrack_x_mot20.tar', type=str, help="ckpt for eval")
+    parser.add_argument("--conf", default=0.01, type=float, help="test conf")
+    parser.add_argument("--nms", default=0.7, type=float, help="test nms threshold")
+    parser.add_argument("--tsize", default=None, type=int, help="test img size")
+    parser.add_argument("--seed", default=None, type=int, help="eval seed")
+    # tracking args
+    parser.add_argument("--track_thresh", type=float, default=0.6, help="tracking confidence threshold")
+    parser.add_argument("--track_buffer", type=int, default=30, help="the frames for keep lost tracks")
+    parser.add_argument("--match_thresh", type=float, default=0.9, help="matching threshold for tracking")
+    parser.add_argument("--min-box-area", type=float, default=100, help='filter out tiny boxes')
+    parser.add_argument("--mot20", dest="mot20", default=False, action="store_true", help="test mot20.")
+    return parser
+# def make_parser():
+#     # python tools/demo_track.py -h 查看帮助信息/--help
+#     # 使用时顺序无关紧要
+#     parser = argparse.ArgumentParser("ByteTrack Demo!") # 创建解析对象
+#     # -- 表示可选参数，其余表示必选参数
+#     parser.add_argument(
+#         "--demo", default="image", help="demo type, eg. image, video and webcam"
+#     )
+#     parser.add_argument("-expn", "--experiment-name", type=str, default=None)
+#     parser.add_argument("-n", "--name", type=str, default=None, help="model name")
+#
+#     parser.add_argument(
+#         "--path", default="/home/allenyljiang/Documents/Dataset/MOT20/train/MOT20-02/img1", help="path to images or video"
+#     )
+#     parser.add_argument("--camid", type=int, default=0, help="webcam demo camera id")
+#     parser.add_argument(
+#         "--save_result",
+#         action="store_true",
+#         help="whether to save the inference result of image/video",
+#     )# action表示--save_result标志存在时赋值为"store_true"
+#
+#     # exp file
+#     parser.add_argument(
+#         "-f",# 短选项，使用-f/--exp_file均可
+#         "--exp_file",
+#         default='exps/example/mot/yolox_x_mix_mot20_ch.py.py',
+#         type=str,
+#         help="pls input your expriment description file",
+#     )
+#     parser.add_argument("-c", "--ckpt", default='/usr/local/SSP_EM/weights/bytetrack_x_mot20.tar', type=str, help="ckpt for eval")
+#     parser.add_argument(
+#         "--device",
+#         default="gpu",
+#         type=str,
+#         help="device to run our model, can either be cpu or gpu",
+#     )
+#     parser.add_argument("--conf", default=None, type=float, help="test conf")
+#     parser.add_argument("--nms", default=None, type=float, help="test nms threshold")
+#     parser.add_argument("--tsize", default=None, type=int, help="test img size")
+#     parser.add_argument("--fps", default=30, type=int, help="frame rate (fps)")
+#     parser.add_argument(
+#         "--fp16",
+#         dest="fp16",
+#         default= True,
+#         # action="store_true",
+#         help="Adopting mix precision evaluating.",
+#     )
+#     parser.add_argument(
+#         "--fuse",
+#         dest="fuse",
+#         default= True,
+#         # action="store_true",
+#         help="Fuse conv and bn for testing.",
+#     )
+#     parser.add_argument(
+#         "--test",
+#         dest="test",
+#         default=False,
+#         action="store_true",
+#         help="Evaluating on test-dev set.",
+#     )
+#     parser.add_argument(
+#         "--trt",
+#         dest="trt",
+#         default=False,
+#         action="store_true",
+#         help="Using TensorRT model for testing.",
+#     )
+#     # # tracking args
+#     # parser.add_argument("--track_thresh", type=float, default=0.5, help="tracking confidence threshold")
+#     # parser.add_argument("--track_buffer", type=int, default=30, help="the frames for keep lost tracks")
+#     # parser.add_argument("--match_thresh", type=float, default=0.8, help="matching threshold for tracking")
+#     # parser.add_argument(
+#     #     "--aspect_ratio_thresh", type=float, default=1.6,
+#     #     help="threshold for filtering out boxes of which aspect ratio are above the given value."
+#     # )
+#     # parser.add_argument('--min_box_area', type=float, default=10, help='filter out tiny boxes')
+#     # parser.add_argument("--mot20", dest="mot20", default=False, action="store_true", help="test mot20.")
+#     return parser
 # np.warnings.filterwarnings('ignore',category=np.RankWarning)
 def tracemalloc_snapshot(snapshot1):
     snapshot2 = tracemalloc.take_snapshot()
@@ -519,7 +703,78 @@ def compute_iou_between_bbox_list(head_box_detected, box_detected):#[(left, top)
             corresponding_coefficient_matrix[idx_row, idx_col] = compute_iou_single_box([head_box_detected[idx_row][0][1], head_box_detected[idx_row][1][1], head_box_detected[idx_row][0][0], head_box_detected[idx_row][1][0]], \
                                                                                         [box_detected[idx_col][0][1], box_detected[idx_col][1][1], box_detected[idx_col][0][0], box_detected[idx_col][1][0]])
     return corresponding_coefficient_matrix
+def tracklet_collection(dataloader,img_size,outputs, info_imgs, ids, box_detected, box_confidence_scores, tracklet_pose_collection, bbox_confidence_threshold, tracklet_inner_cnt,source,nms_thresh):
+    # pred - predicted human bounding boxes with confidences
+    # path - to current image for pose estimation
+    # out - output directory
+    # im0s - current image array, 1080x1920x3
+    # img - current image array with shape 1x3x1088x1920
+    # tracklet_inner_cnt - index of frame
+    # pose_model, pose_transform - model for pose estimation
+    global det_cnt
+    global frame_cnt
+    global det_cnt_frame_list
+    img_h,img_w,img_id = info_imgs[0], info_imgs[1], ids
+    output = outputs[0]
+    output = output.cpu()
 
+    bboxes = output[:, 0:4]
+
+    # preprocessing: resize
+    scale = min(
+        img_size[0] / float(img_h), img_size[1] / float(img_w)
+    )
+    bboxes /= scale # xyxy
+    # bboxes = xyxy2xywh(bboxes)
+
+    cls = output[:, 6] # 0
+    scores = output[:, 4] * output[:, 5]
+    for ind in range(bboxes.shape[0]):
+        label = dataloader.dataset.class_ids[int(cls[ind])]
+        # pred_data = {
+        #     "image_id": int(img_id),
+        #     "category_id": label,
+        #     "bbox": bboxes[ind].numpy().tolist(),
+        #     "score": scores[ind].numpy().item(),
+        #     "segmentation": [],
+        # }  # COCO json format
+        box_detected.append([(float(bboxes[ind][0].data.cpu().numpy()), float(bboxes[ind][1].data.cpu().numpy())), (float(bboxes[ind][2].data.cpu().numpy()), float(bboxes[ind][3].data.cpu().numpy()))])
+        box_confidence_scores.append(float(scores[ind].data.cpu().numpy()) + 1e-4*random.random())
+
+    box_detected = [box_detected[box_confidence_scores.index(x)] for x in box_confidence_scores if x > bbox_confidence_threshold] # 0.4
+    box_confidence_scores = [box_confidence_scores[box_confidence_scores.index(x)] for x in box_confidence_scores if x > bbox_confidence_threshold]
+
+        # if len(box_detected) > maximum_number_people:
+        #     lowest_confidence_idx = box_confidence_scores.index(min(box_confidence_scores))
+        #     box_detected.pop(lowest_confidence_idx)
+        #     box_confidence_scores.pop(lowest_confidence_idx)
+    if len(box_detected) == 0:
+        tracklet_pose_collection.append([])
+        return tracklet_pose_collection
+    # path = os.path.join(source,info_imgs[4][0].split('/')[-1])  # info_imgs[4] 是一个list
+    path = os.path.join('/home/allenyljiang/Documents/Dataset/MOT20/test/',info_imgs[4][0])  # info_imgs[4] 是一个list
+    tracklet_pose_collection_tmp = {}
+    tracklet_pose_collection_tmp['bbox_list'] = box_detected
+    tracklet_pose_collection_tmp['box_confidence_scores'] = box_confidence_scores
+    tracklet_pose_collection_tmp['img_dir'] = path
+    tracklet_pose_collection_tmp['foreignmatter_bbox_list'] = []
+    tracklet_pose_collection_tmp['foreignmatter_box_confidence_scores'] = []
+    tracklet_pose_collection.append(tracklet_pose_collection_tmp)
+    img = cv2.imread(path)
+    if not os.path.exists(os.path.join(os.path.dirname(path)[:-4]+ 'detect'+str(bbox_confidence_threshold)+'nms'+ str(nms_thresh)+'/')):
+        os.makedirs(os.path.join(os.path.dirname(path)[:-4]+ 'detect'+str(bbox_confidence_threshold)+'nms'+ str(nms_thresh)+'/'))
+    dstfile = os.path.join(os.path.dirname(path)[:-4]+ 'detect'+str(bbox_confidence_threshold)+'nms'+ str(nms_thresh)+'/'+ path.split('/')[-1])
+    # dstfile = path.split('.jpg')[0] + '_detect.jpg'
+    print(len(box_detected))
+    det_cnt_frame_list.append(len(box_detected))
+    det_cnt += len(box_detected)
+    for idx,bbox in enumerate(box_detected):
+        # if round(box_confidence_scores[idx],2) > 0.6:
+        #     continue
+        cv2.rectangle(img,(int(bbox[0][0]),int(bbox[0][1])),(int(bbox[1][0]),int(bbox[1][1])),(0,255,0),2)
+        cv2.putText(img,str(round(box_confidence_scores[idx],2)),(int((int(bbox[0][0])+int(bbox[1][0]))/2),int((int(bbox[0][1])+int(bbox[1][1]))/2)),cv2.FONT_HERSHEY_SIMPLEX,1,(0,0,255),2)
+    cv2.imwrite(dstfile,img)
+    return tracklet_pose_collection
 def conduct_pose_estimation(webcam, path, out, im0s, pred, img, dataset, save_txt, save_img, view_img, box_detected, head_box_detected, foreignmatter_box_detected, box_confidence_scores, head_box_confidence_scores, foreignmatter_box_confidence_scores, centers, scales, vid_path, vid_writer, vid_cap, tracklet_pose_collection, names, colors, pose_transform, bbox_confidence_threshold, tracklet_inner_cnt, need_face_recognition_switch, face_verification_thresh, nms_thresh):
     # pred - predicted human bounding boxes with confidences
     # path - to current image for pose estimation
@@ -528,9 +783,9 @@ def conduct_pose_estimation(webcam, path, out, im0s, pred, img, dataset, save_tx
     # img - current image array with shape 1x3x1088x1920
     # tracklet_inner_cnt - index of frame
     # pose_model, pose_transform - model for pose estimation
-    global det_cnt_frame_list
     global det_cnt
     global frame_cnt
+    global det_cnt_frame_list
     for i, det in enumerate(pred):  # detections per image
         if webcam:  # batch_size >= 1
             p, s, im0 = path[i], '%g: ' % i, im0s[i].copy()
@@ -548,7 +803,7 @@ def conduct_pose_estimation(webcam, path, out, im0s, pred, img, dataset, save_tx
             # Print results
             for c in det[:, -1].unique():
                 n = (det[:, -1] == c).sum()  # detections per class
-                s += '%g %ss, ' % (n, names[int(c)])  # add to string
+                s += '%g %ss, ' % (n, names[int(c)])  # add to string # '544x960 43 persons'
 
             # Write results
             for *xyxy, conf, cls in reversed(det):
@@ -562,22 +817,22 @@ def conduct_pose_estimation(webcam, path, out, im0s, pred, img, dataset, save_tx
                     plot_one_box(xyxy, im0, label=label, color=colors[int(cls)], line_thickness=3)
                 ######################################################### pose estimation #########################################################
                 if int(cls.data.cpu().numpy()) == 0:
-
-                    width = abs(xyxy[2] - xyxy[0])
-                    height = abs(xyxy[3] - xyxy[1])
-                    if width*height < 100:
-                        continue
                     # if min([float(xyxy[3].data.cpu().numpy()), float(xyxy[1].data.cpu().numpy())]) - 0.0 > abs(float(xyxy[3].data.cpu().numpy())-float(xyxy[1].data.cpu().numpy())) and im0s.shape[0] - max([float(xyxy[3].data.cpu().numpy()), float(xyxy[1].data.cpu().numpy())]) > abs(float(xyxy[3].data.cpu().numpy())-float(xyxy[1].data.cpu().numpy())) and \
                     #     min([float(xyxy[2].data.cpu().numpy()), float(xyxy[0].data.cpu().numpy())]) - 0.0 > abs(float(xyxy[2].data.cpu().numpy())-float(xyxy[0].data.cpu().numpy())) and im0s.shape[1] - max([float(xyxy[2].data.cpu().numpy()), float(xyxy[0].data.cpu().numpy())]) > abs(float(xyxy[2].data.cpu().numpy())-float(xyxy[0].data.cpu().numpy())) and \
                     #     max([abs(float(xyxy[3].data.cpu().numpy())-float(xyxy[1].data.cpu().numpy())), abs(float(xyxy[2].data.cpu().numpy())-float(xyxy[0].data.cpu().numpy()))]) < 50: # and \
                     #     continue   
                     box_detected.append([(float(xyxy[0].data.cpu().numpy()), float(xyxy[1].data.cpu().numpy())), (float(xyxy[2].data.cpu().numpy()), float(xyxy[3].data.cpu().numpy()))])
                     box_confidence_scores.append(float(conf.data.cpu().numpy()) + 1e-4*random.random())
-                if int(cls.data.cpu().numpy()) == 1:#body
+                if int(cls.data.cpu().numpy()) == 1:# head
                     head_box_detected.append([(float(xyxy[0].data.cpu().numpy()), float(xyxy[1].data.cpu().numpy())), (float(xyxy[2].data.cpu().numpy()), float(xyxy[3].data.cpu().numpy()))])
                     head_box_confidence_scores.append(float(conf.data.cpu().numpy()) + 1e-4*random.random())
             box_detected = [box_detected[box_confidence_scores.index(x)] for x in box_confidence_scores if x > bbox_confidence_threshold] # 0.4
+
+            box_confidence_scores_without_select = [box_confidence_scores[box_confidence_scores.index(x)] for x in box_confidence_scores]
+            print('confidence score before select',min(box_confidence_scores_without_select))
+
             box_confidence_scores = [box_confidence_scores[box_confidence_scores.index(x)] for x in box_confidence_scores if x > bbox_confidence_threshold]
+            print('min confidence score after select',min(box_confidence_scores))
             head_box_detected = [head_box_detected[head_box_confidence_scores.index(x)] for x in head_box_confidence_scores if x > head_bbox_confidence_threshold] # 0.55
             head_box_confidence_scores = [head_box_confidence_scores[head_box_confidence_scores.index(x)] for x in head_box_confidence_scores if x > head_bbox_confidence_threshold]
             # if len(box_detected) > maximum_number_people:
@@ -676,16 +931,6 @@ def conduct_pose_estimation(webcam, path, out, im0s, pred, img, dataset, save_tx
     tracklet_pose_collection_tmp['foreignmatter_bbox_list'] = []
     tracklet_pose_collection_tmp['foreignmatter_box_confidence_scores'] = []
     tracklet_pose_collection.append(tracklet_pose_collection_tmp)
-    # img = cv2.imread(path)
-    # if not os.path.exists(os.path.join('/home/allenyljiang/Documents/Dataset/MOT20/train/MOT20-01/'+ 'detect'+str(bbox_confidence_threshold)+'/')):
-    #     os.makedirs(os.path.join('/home/allenyljiang/Documents/Dataset/MOT20/train/MOT20-01/'+ 'detect'+str(bbox_confidence_threshold)+'/'))
-    # dstfile = os.path.join('/home/allenyljiang/Documents/Dataset/MOT20/train/MOT20-01/'+ 'detect'+str(bbox_confidence_threshold)+'/'+ path.split('/')[-1])
-    # # dstfile = path.split('.jpg')[0] + '_detect.jpg'
-    # print(len(box_detected))
-    # for idx,bbox in enumerate(box_detected):
-    #     cv2.rectangle(img,(int(bbox[0][0]),int(bbox[0][1])),(int(bbox[1][0]),int(bbox[1][1])),(0,255,0),2)
-    #     cv2.putText(img,str(round(box_confidence_scores[idx],2)),(int((int(bbox[0][0])+int(bbox[1][0]))/2),int((int(bbox[0][1])+int(bbox[1][1]))/2)),cv2.FONT_HERSHEY_SIMPLEX,1,(0,0,255),2)
-    # cv2.imwrite(dstfile,img)
     img = cv2.imread(path)
     if not os.path.exists(os.path.join(os.path.dirname(path)[:-4]+ 'detect'+str(bbox_confidence_threshold)+'nms'+ str(nms_thresh)+'/')):
         os.makedirs(os.path.join(os.path.dirname(path)[:-4]+ 'detect'+str(bbox_confidence_threshold)+'nms'+ str(nms_thresh)+'/'))
@@ -2145,9 +2390,12 @@ def convert_track_to_stitch_format(split_each_track,mapping_node_id_to_bbox,mapp
     return curr_predicted_tracks,curr_predicted_tracks_confidence_score,curr_predicted_tracks_bboxes,curr_representative_frames,curr_predicted_tracks_bboxes_test,trajectory_similarity_dict
 
 
-def detect(opt, need_face_recognition_switch = 0, face_verification_thresh = 0.0, save_img=False):
-    out, track_out, source, weights, view_img, save_txt, imgsz, ab_detect_hyp = \
-        opt['output'], opt['track_out'], opt['source'], opt['weights'], opt['view_img'], opt['save_txt'], opt['img_size'], opt['ab_detect_hyp']
+def detect(opt,exp,args):
+    need_face_recognition_switch = 0
+    face_verification_thresh = 0.0
+    save_img = False
+    out, track_out, source, weights, view_img, save_txt, imgsz, ab_detect_hyp,source = \
+        opt['output'], opt['track_out'], opt['source'], opt['weights'], opt['view_img'], opt['save_txt'], opt['img_size'], opt['ab_detect_hyp'],opt['source']
     webcam = source.isnumeric() or source.startswith('rtsp') or source.startswith('http') or source.endswith('.txt')
     if os.path.exists(track_out):
         shutil.rmtree(track_out)
@@ -2190,11 +2438,83 @@ def detect(opt, need_face_recognition_switch = 0, face_verification_thresh = 0.0
     global current_video_segment_representative_frames_backup
     global current_video_segment_all_traj_all_object_features_backup
     global stitching_tracklets_dict
-    global batch_id,batch_stride,batch_stride_write
+    global batch_id,batch_stride,batch_stride_write,det_cnt,frame_cnt
     global frame_width
     global frame_height
     global tracklet_len
-    # objgraph.show_growth()
+
+
+    if not args.experiment_name:
+        args.experiment_name = exp.exp_name # 'yolox_s_mix_det'
+
+    output_dir = osp.join(exp.output_dir, args.experiment_name)#exp.output_dir='./YOLOX_outputs
+    os.makedirs(output_dir, exist_ok=True)
+
+    # if args.save_result:
+    #     vis_folder = osp.join(output_dir, "track_vis")
+    #     os.makedirs(vis_folder, exist_ok=True)
+
+    if args.trt:
+        args.device = "gpu"
+    # args.device = torch.device("cuda" if args.device == "gpu" else "cpu")
+
+    logger.info("Args: {}".format(args))
+
+    if args.conf is not None:
+        exp.test_conf = args.conf
+    if args.nms is not None:
+        exp.nmsthre = args.nms
+    if args.tsize is not None:
+        exp.test_size = (args.tsize, args.tsize)
+    ## parameter ##
+    rank = args.local_rank
+    file_name = os.path.join(exp.output_dir, args.experiment_name)
+    # step 1
+    model = exp.get_model()
+    logger.info("Model Summary: {}".format(get_model_info(model, exp.test_size)))
+    # step2
+    torch.cuda.set_device(rank)  # 0
+    model.cuda(rank)
+    model.eval()
+
+
+    is_distributed = False  # gpu个数大于1的时候is_distributed为True
+    dataloader = exp.get_eval_loader(1, is_distributed, args.test)  # (1,False,False)
+    frame_cnt = len(dataloader)
+    # step 3
+    if not args.speed and not args.trt:  # True
+        if args.ckpt is None:
+            ckpt_file = os.path.join(file_name, "best_ckpt.pth.tar")
+        else:  # '../pretrained/bytetrack_x_mot20.tar'
+            ckpt_file = args.ckpt
+        logger.info("loading checkpoint")
+        loc = "cuda:{}".format(rank)  # cuda:0
+        ckpt = torch.load(ckpt_file, map_location=loc)  # 加载模型参数
+        # load the model state dict
+        model.load_state_dict(ckpt["model"])  # ckpt部分信息
+        logger.info("loaded checkpoint done.")
+    # step4
+    # if is_distributed:  # False
+    #     model = DDP(model, device_ids=[rank])
+
+    if args.fuse:  # True
+        logger.info("\tFusing model...")
+        model = fuse_model(model)
+
+    if args.trt:  # False
+        assert (
+                not args.fuse and not is_distributed and args.batch_size == 1
+        ), "TensorRT model is not support model fusing and distributed inferencing!"
+        trt_file = os.path.join(file_name, "model_trt.pth")
+        assert os.path.exists(
+            trt_file
+        ), "TensorRT model is not found!\n Run tools/trt.py first!"
+        model.head.decode_in_inference = False
+        decoder = model.head.decode_outputs
+    else:
+        trt_file = None
+        decoder = None
+    ##
 
     # Initialize
     set_logging()
@@ -2203,13 +2523,11 @@ def detect(opt, need_face_recognition_switch = 0, face_verification_thresh = 0.0
         shutil.rmtree(out)  # delete output folder
     os.makedirs(out)  # make new output folder
     half = device.type != 'cpu'  # half precision only supported on CUDA
-
-    # Load model
-    model = attempt_load(weights, map_location=device)  # load FP32 model
-
-    imgsz = check_img_size(imgsz, s=model.stride.max())  # check img_size
-    if half:
-        model.half()  # to FP16
+    # # Load model
+    # model = attempt_load(weights, map_location=device)  # load FP32 model
+    # imgsz = check_img_size(imgsz, s=model.stride.max())  # check img_size
+    # if half:
+    #     model.half()  # to FP16
 
     pose_transform = transforms.Compose([
         transforms.ToTensor(),
@@ -2226,22 +2544,26 @@ def detect(opt, need_face_recognition_switch = 0, face_verification_thresh = 0.0
 
     # Set Dataloader
     vid_path, vid_writer = None, None
-    if webcam:
-        view_img = True
-        cudnn.benchmark = True  # set True to speed up constant image size inference
-        dataset = LoadStreams(source, img_size=imgsz)
-    else:
-        save_img = True
-        dataset = LoadImages(source, img_size=imgsz)
+
+    # seq_path = '/home/allenyljiang/Documents/Dataset/MOT20'
+    # phase = 'train' # 'test'
+    # pattern = os.path.join(seq_path,phase,'*','img1')
+# for source in glob.glob(pattern):
+    tracklet_pose_collection = []
+
+    ## step 6
+    model = model.eval()
+    tensor_type = torch.cuda.HalfTensor if half else torch.cuda.FloatTensor
+    if half:  # True
+        model = model.half()
+
 
     # Get names and colors
-    names = model.module.names if hasattr(model, 'module') else model.names
+    names = ['person']
+    # names = model.module.names if hasattr(model, 'module') else model.names
     colors = [[random.randint(0, 255) for _ in range(3)] for _ in range(len(names))]
 
-    # Run inference
-    t0 = time.time()
-    img = torch.zeros((1, 3, imgsz, imgsz), device=device)  # init img
-    _ = model(img.half() if half else img) if device.type != 'cpu' else None  # run once
+
     ######################################################### detection #####################################################################
     tracklet_inner_cnt = 0  # tracklet_inner_cnt is an integer indicating the index of the last frame in current batch of frames for tracking, a batch of tracklet_len frames are processed together each time
 
@@ -2262,6 +2584,20 @@ def detect(opt, need_face_recognition_switch = 0, face_verification_thresh = 0.0
     anomaly_detection_median_filter = {}
     most_updated_json_idx = 0
 
+    # dataset.nf = 100
+    # start_file = len(dataset.files) - dataset.nf
+    # dataset.files = dataset.files[:start_file]
+    # dataset.video_flag = dataset.video_flag[:start_file]
+    # frame_cnt = dataset.nf
+
+    # dataset.nf = 400
+    # start_file = len(dataset.files) - dataset.nf
+    # # dataset.files = dataset.files[start_file:]
+    # ## 选取前 50 frames
+    # dataset.files = dataset.files[1700:2100]
+    # dataset.video_flag = dataset.video_flag[1700:2100]
+    # frame_cnt = dataset.nf
+
     # dataset.files = dataset.files[12:]
     # dataset.video_flag = dataset.video_flag[12:]
     # det = open('/home/allenyljiang/Documents/Dataset/MOT20/train/MOT20-01/det_tracklet.txt',encoding='utf-8')
@@ -2274,31 +2610,35 @@ def detect(opt, need_face_recognition_switch = 0, face_verification_thresh = 0.0
     current_video_segment_predicted_tracks_backup = {}
     current_video_segment_predicted_tracks_bboxes_backup = {}
     current_video_segment_representative_frames_backup = {}
-    total_frames = len(dataset.files)
+    total_frames = len(dataloader)
     batch_cnt = math.ceil((total_frames-1)/batch_stride)# 一共47+1个batch，429张图片, the last batch:5 frames
     unmatched_tracks_memory_dict = {} # 记忆轨迹unmatched的次数，超过一定次数之后舍弃轨迹
-    for path, img, im0s, vid_cap in dataset: # check whether in reasonable order
-        frame_width,frame_height = im0s.shape[1],im0s.shape[0]
-        pose_preds = np.empty(shape=[0, 0])
-        pose_confidences = np.empty(shape=[0, 0])
-        img = torch.from_numpy(img).to(device)
-        img = img.half() if half else img.float()  # uint8 to fp16/32
-        img /= 255.0  # 0 - 255 to 0.0 - 1.0
-        if img.ndimension() == 3:
-            img = img.unsqueeze(0)
+    # for path, img, im0s, vid_cap in dataset: # check whether in reasonable order
+    img_size = exp.test_size # (896,1600)
+    for imgs, _, info_imgs, ids in dataloader:
+        with torch.no_grad():
+            gc.collect()
+            torch.cuda.empty_cache()
 
-        # Inference
-        t1 = time_synchronized()
-        pred = model(img, augment=opt['augment'])[0]
-
+            frame_width,frame_height = info_imgs[1],info_imgs[0]
+            img_file_name = info_imgs[4]
+            imgs = imgs.type(tensor_type)  # 对imgs类型进行转换
+            # imgs_byte = torch.load('/home/allenyljiang/Documents/ByteTrack-main/saved_variables/imgs.pt')
+            # imgs.equal(imgs_byte)
+            # Inference
+            t1 = time_synchronized()
+            # pred = model(img, augment=opt['augment'])[0]
+            pred = model(imgs) # (1,10710,6)
+            num_classes = 1
+            confthre = 0.01
+            nmsthre = 0.7
+            pred = postprocess(pred, num_classes, confthre, nmsthre)
+            # byte_pred = torch.load('/home/allenyljiang/Documents/ByteTrack-main/saved_variables/outputs1.pt')
+            # pred[0].equal(byte_pred) # 比较两个张量是否相等
+            # pred[0].eq(byte_pred) # 逐元素判断
         # Apply NMS
-        pred = non_max_suppression(pred, opt['conf_thres'], opt['iou_thres'], classes=opt['classes'], agnostic=opt['agnostic_nms'])
+        # pred = non_max_suppression(pred, opt['conf_thres'], opt['iou_thres'], classes=opt['classes'], agnostic=opt['agnostic_nms'])
         t2 = time_synchronized()
-
-        # Apply Classifier
-        if classify:
-            pred = apply_classifier(pred, modelc, img, im0s)
-
         # Process detections
         box_detected = []
         head_box_detected = []
@@ -2319,7 +2659,8 @@ def detect(opt, need_face_recognition_switch = 0, face_verification_thresh = 0.0
         #     tracklet_inner_cnt = len(tracklet_pose_collection)
         # 使用自带detector
         # 每次只保存当前batch的结果
-        tracklet_pose_collection = conduct_pose_estimation(webcam, path, out, im0s, pred, img, dataset, save_txt, save_img, view_img, box_detected, head_box_detected, foreignmatter_box_detected, box_confidence_scores, head_box_confidence_scores, foreignmatter_box_confidence_scores, centers, scales, vid_path, vid_writer, vid_cap, tracklet_pose_collection, names, colors, pose_transform, bbox_confidence_threshold, tracklet_inner_cnt, need_face_recognition_switch, face_verification_thresh, opt['iou_thres'])
+        # tracklet_pose_collection = conduct_pose_estimation(webcam, path, out, im0s, pred, img, dataset, save_txt, save_img, view_img, box_detected, head_box_detected, foreignmatter_box_detected, box_confidence_scores, head_box_confidence_scores, foreignmatter_box_confidence_scores, centers, scales, vid_path, vid_writer, vid_cap, tracklet_pose_collection, names, colors, pose_transform, bbox_confidence_threshold, tracklet_inner_cnt, need_face_recognition_switch, face_verification_thresh, nmsthre)
+        tracklet_pose_collection = tracklet_collection(dataloader,img_size,pred, info_imgs, ids, box_detected, box_confidence_scores, tracklet_pose_collection, bbox_confidence_threshold, tracklet_inner_cnt,source,nmsthre)
         # tracklet_pose_collection_tmp = json.loads(det.readline())
         # tracklet_pose_collection.append(tracklet_pose_collection_tmp)
         if total_frames <= tracklet_len: # 不足一个batch
@@ -2370,7 +2711,7 @@ def parse_opt():
     parser = argparse.ArgumentParser()#　照片要jpg格式
     # /usr/local/SSP_EM/05_0019
     # /home/allenyljiang/Documents/Dataset/MOT20/train/MOT20-01/img1
-    parser.add_argument('--source', type=str, default='/home/allenyljiang/Documents/Dataset/MOT20/test/MOT20-08/img1_test', help='file/dir/URL/glob, 0 for webcam')#/media/allenyljiang/Seagate_Backup_Plus_Drive/usr/local/VIBE-master/data/neurocomputing/05_0019
+    parser.add_argument('--source', type=str, default='/home/allenyljiang/Documents/Dataset/MOT20/test/MOT20-06/img1', help='file/dir/URL/glob, 0 for webcam')#/media/allenyljiang/Seagate_Backup_Plus_Drive/usr/local/VIBE-master/data/neurocomputing/05_0019
 
     opt = parser.parse_args()
     return opt
@@ -2383,13 +2724,13 @@ if __name__ == '__main__':
     opt['source'] = input_opt.source # r'/media/allenyljiang/Seagate_Backup_Plus_Drive/usr/local/VIBE-master/data/neurocomputing/05_0019'
     opt['modelDir'] = ''
     opt['logDir'] = ''
-    opt['weights'] = ['weights/crowdhuman_yolov5m.pt']
+    opt['weights'] = ['weights/bytetrack_x_mot20.tar']
     opt['ab_detect_hyp'] = ''
     opt['output'] = 'cache/'
     opt['track_out'] = 'cache/'
     opt['img_size'] = 960
-    opt['conf_thres'] = 0.25 # 0.25
-    opt['iou_thres'] = 0.50
+    opt['conf_thres'] = 0.25
+    opt['iou_thres'] = 0.4
     opt['device'] = '0'#'1'
     opt['view_img'] = False
     opt['save_txt'] = False
@@ -2414,8 +2755,19 @@ if __name__ == '__main__':
     #         continue
     #     logger.warning(stat)
     # snapshot = tracemalloc.take_snapshot()
-    detect(opt)
+    # detect(opt)
+    args = make_parser().parse_args()#解析参数
+    exp = get_exp(args.exp_file, args.name)# 模型参数（键值对形式）
+    detect(opt,exp,args)
+    print('total_det:{0},average_det:{1}'.format(det_cnt,det_cnt/frame_cnt))
+    plt.figure()
+    plt.plot(det_cnt_frame_list)
 
+    folder = opt['source'].split('/')[-2] # 'MOT20-08'
+    plt.savefig(folder+'_bbox_thresh'+str(bbox_confidence_threshold)+'nms0.7.jpg')
+    f = open(folder + '_bbox_thresh'+str(bbox_confidence_threshold)+"_bytetrack_det.txt", "w")
+    f.write(str(det_cnt_frame_list))
+    f.close()
     #snapshot = tracemalloc.take_snapshot()
     # tracemalloc_snapshot(snapshot)
     # snapshot = tracemalloc.take_snapshot() #  快照,当前内存分配

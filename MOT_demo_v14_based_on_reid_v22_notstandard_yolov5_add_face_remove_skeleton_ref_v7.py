@@ -2,6 +2,11 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import contextlib
+import io
+import tempfile
+
+from loguru import logger
 import gc
 import tracemalloc
 import warnings
@@ -59,10 +64,10 @@ import sys
 import os.path as osp
 import torch.nn as nn
 from similarity_module import torchreid
-from similarity_module.torchreid.utils import (
-    Logger, check_isfile, set_random_seed, collect_env_info,
-    resume_from_checkpoint, load_pretrained_weights, compute_model_complexity
-)
+# from similarity_module.torchreid.utils import (
+#     Logger, check_isfile, set_random_seed, collect_env_info,
+#     resume_from_checkpoint, load_pretrained_weights, compute_model_complexity
+# )
 from similarity_module.scripts.default_config import (
     imagedata_kwargs, optimizer_kwargs, videodata_kwargs, engine_run_kwargs,
     get_default_config, lr_scheduler_kwargs
@@ -138,7 +143,7 @@ median_filter_radius = 4
 num_samples_around_each_joint = 3
 maximum_possible_number = math.exp(10)
 average_sampling_density_hori_vert = 7
-bbox_confidence_threshold = 0.7 #5 # 0.45
+bbox_confidence_threshold = 0.6 #5 # 0.45
 head_bbox_confidence_threshold = 0.55 # 0.6 # 0.45
 temporal_length_thresh_inside_tracklet = 5
 tracklet_confidence_threshold = 0.6
@@ -170,8 +175,8 @@ foreign_matter_cls_id_dict = {
 }
 # tracemalloc.start() # 开始跟踪内存分配
 # snapshot = tracemalloc.take_snapshot()
-np.warnings.filterwarnings('ignore',category=np.VisibleDeprecationWarning)
-# warnings.filterwarnings('ignore')
+# np.warnings.filterwarnings('ignore',category=np.VisibleDeprecationWarning)
+warnings.filterwarnings('ignore')
 
 # np.warnings.filterwarnings('ignore',category=np.RankWarning)
 
@@ -228,6 +233,16 @@ def make_parser():
         type=str,
         help="device to run our model, can either be cpu or gpu",
     )
+    # 设备
+    parser.add_argument(
+        "--local_rank", default=0, type=int, help="local rank for dist training"
+    )
+    parser.add_argument(
+        "--num_machines", default=1, type=int, help="num of node for training"
+    )
+    parser.add_argument(
+        "--machine_rank", default=0, type=int, help="node rank for multi-node training"
+    )
     parser.add_argument("--conf", default=None, type=float, help="test conf")
     parser.add_argument("--nms", default=None, type=float, help="test nms threshold")
     parser.add_argument("--tsize", default=None, type=int, help="test img size")
@@ -247,11 +262,25 @@ def make_parser():
         help="Fuse conv and bn for testing.",
     )
     parser.add_argument(
+        "--test",
+        dest="test",
+        default=False,
+        action="store_true",
+        help="Evaluating on test-dev set.",
+    )
+    parser.add_argument(
         "--trt",
         dest="trt",
         default=False,
         action="store_true",
         help="Using TensorRT model for testing.",
+    )
+    parser.add_argument(
+        "--speed",
+        dest="speed",
+        default=False,
+        action="store_true",
+        help="speed test only.",
     )
     # # tracking args
     # parser.add_argument("--track_thresh", type=float, default=0.5, help="tracking confidence threshold")
@@ -835,6 +864,147 @@ def compute_iou_between_bbox_list(head_box_detected, box_detected):#[(left, top)
                                                                                         [box_detected[idx_col][0][1], box_detected[idx_col][1][1], box_detected[idx_col][0][0], box_detected[idx_col][1][0]])
     return corresponding_coefficient_matrix
 
+def evaluate_prediction(dataloader, data_dict):
+    if not is_main_process():
+        return 0, 0, None
+
+    logger.info("Evaluate in main process...")
+
+    annType = ["segm", "bbox", "keypoints"]
+
+    # inference_time = statistics[0].item()
+    # track_time = statistics[1].item()
+    # n_samples = statistics[2].item()
+
+    # a_infer_time = 1000 * inference_time / (n_samples * self.dataloader.batch_size)
+    # a_track_time = 1000 * track_time / (n_samples * self.dataloader.batch_size)
+
+    # time_info = ", ".join(
+    #     [
+    #         "Average {} time: {:.2f} ms".format(k, v)
+    #         for k, v in zip(
+    #             ["forward", "track", "inference"],
+    #             [a_infer_time, a_track_time, (a_infer_time + a_track_time)],
+    #         )
+    #     ]
+    # )
+
+    # info = time_info + "\n"
+
+    # Evaluate the Dt (detection) json comparing with the ground truth
+    if len(data_dict) > 0:
+        cocoGt = dataloader.dataset.coco
+
+        _, tmp = tempfile.mkstemp()
+        json.dump(data_dict, open(tmp, "w"))
+        cocoDt = cocoGt.loadRes(tmp)
+        '''
+        try:
+            from yolox.layers import COCOeval_opt as COCOeval
+        except ImportError:
+            from pycocotools import cocoeval as COCOeval
+            logger.warning("Use standard COCOeval.")
+        '''
+        #from pycocotools.cocoeval import COCOeval
+        from yolox.layers import COCOeval_opt as COCOeval
+        cocoEval = COCOeval(cocoGt, cocoDt, annType[1])
+        cocoEval.evaluate()
+        cocoEval.accumulate()
+        redirect_string = io.StringIO()
+        with contextlib.redirect_stdout(redirect_string):
+            cocoEval.summarize()
+        # info += redirect_string.getvalue()
+        return cocoEval.stats[0], cocoEval.stats[1]
+    else:
+        return 0, 0
+
+def convert_to_coco_format(dataloader, outputs, info_imgs, ids):
+    data_list = []
+    for (output, img_h, img_w, img_id) in zip(
+        outputs, info_imgs[0], info_imgs[1], ids
+    ):
+        if output is None:
+            continue
+        output = output.cpu()
+
+        bboxes = output[:, 0:4]
+
+        # preprocessing: resize
+        scale = min(
+            dataloader.dataset.img_size[0] / float(img_h), dataloader.dataset.img_size[1] / float(img_w)
+        )
+        bboxes /= scale
+        bboxes = xyxy2xywh(bboxes)
+
+        cls = output[:, 6] # 0
+        scores = output[:, 4] * output[:, 5]
+        for ind in range(bboxes.shape[0]):
+            label = dataloader.dataset.class_ids[int(cls[ind])]
+            pred_data = {
+                "image_id": int(img_id),
+                "category_id": label,
+                "bbox": bboxes[ind].numpy().tolist(),
+                "score": scores[ind].numpy().item(),
+                "segmentation": [],
+            }  # COCO json format
+            data_list.append(pred_data)
+    return data_list
+
+def tracklet_collection(dataloader,img_size,outputs, info_imgs, ids, box_detected, box_confidence_scores, tracklet_pose_collection, bbox_confidence_threshold, tracklet_inner_cnt,source):
+    # pred - predicted human bounding boxes with confidences
+    # path - to current image for pose estimation
+    # out - output directory
+    # im0s - current image array, 1080x1920x3
+    # img - current image array with shape 1x3x1088x1920
+    # tracklet_inner_cnt - index of frame
+    # pose_model, pose_transform - model for pose estimation
+    img_h,img_w,img_id = info_imgs[0], info_imgs[1], ids
+    output = outputs[0]
+    output = output.cpu()
+
+    bboxes = output[:, 0:4]
+
+    # preprocessing: resize
+    scale = min(
+        img_size[0] / float(img_h), img_size[1] / float(img_w)
+    )
+    bboxes /= scale # xyxy
+    # bboxes = xyxy2xywh(bboxes)
+
+    cls = output[:, 6] # 0
+    scores = output[:, 4] * output[:, 5]
+    for ind in range(bboxes.shape[0]):
+        label = dataloader.dataset.class_ids[int(cls[ind])]
+        # pred_data = {
+        #     "image_id": int(img_id),
+        #     "category_id": label,
+        #     "bbox": bboxes[ind].numpy().tolist(),
+        #     "score": scores[ind].numpy().item(),
+        #     "segmentation": [],
+        # }  # COCO json format
+        box_detected.append([(float(bboxes[ind][0].data.cpu().numpy()), float(bboxes[ind][1].data.cpu().numpy())), (float(bboxes[ind][2].data.cpu().numpy()), float(bboxes[ind][3].data.cpu().numpy()))])
+        box_confidence_scores.append(float(scores[ind].data.cpu().numpy()) + 1e-4*random.random())
+
+    box_detected = [box_detected[box_confidence_scores.index(x)] for x in box_confidence_scores if x > bbox_confidence_threshold] # 0.4
+    box_confidence_scores = [box_confidence_scores[box_confidence_scores.index(x)] for x in box_confidence_scores if x > bbox_confidence_threshold]
+
+        # if len(box_detected) > maximum_number_people:
+        #     lowest_confidence_idx = box_confidence_scores.index(min(box_confidence_scores))
+        #     box_detected.pop(lowest_confidence_idx)
+        #     box_confidence_scores.pop(lowest_confidence_idx)
+    if len(box_detected) == 0:
+        tracklet_pose_collection.append([])
+        return tracklet_pose_collection
+    path = os.path.join(source,info_imgs[4][0].split('/')[-1])  # info_imgs[4] 是一个list
+    tracklet_pose_collection_tmp = {}
+    tracklet_pose_collection_tmp['bbox_list'] = box_detected
+    tracklet_pose_collection_tmp['box_confidence_scores'] = box_confidence_scores
+    tracklet_pose_collection_tmp['img_dir'] = path
+    tracklet_pose_collection_tmp['foreignmatter_bbox_list'] = []
+    tracklet_pose_collection_tmp['foreignmatter_box_confidence_scores'] = []
+    tracklet_pose_collection.append(tracklet_pose_collection_tmp)
+
+    return tracklet_pose_collection
 def conduct_pose_estimation(webcam, path, out, im0s, pred, img, dataset, save_txt, save_img, view_img, box_detected, head_box_detected, foreignmatter_box_detected, box_confidence_scores, head_box_confidence_scores, foreignmatter_box_confidence_scores, centers, scales, vid_path, vid_writer, vid_cap, tracklet_pose_collection, names, colors, pose_transform, bbox_confidence_threshold, tracklet_inner_cnt, need_face_recognition_switch, face_verification_thresh, nms_thresh):
     # pred - predicted human bounding boxes with confidences
     # path - to current image for pose estimation
@@ -984,7 +1154,7 @@ def conduct_pose_estimation(webcam, path, out, im0s, pred, img, dataset, save_tx
 
     tracklet_pose_collection_tmp = {}
     tracklet_pose_collection_tmp['bbox_list'] = box_detected
-    tracklet_pose_collection_tmp['head_bbox_list'] = head_box_detected
+    # tracklet_pose_collection_tmp['head_bbox_list'] = head_box_detected
     tracklet_pose_collection_tmp['box_confidence_scores'] = box_confidence_scores
     tracklet_pose_collection_tmp['img_dir'] = path
     tracklet_pose_collection_tmp['foreignmatter_bbox_list'] = []
@@ -2620,8 +2790,8 @@ def detect(opt,exp,args):
     need_face_recognition_switch = 0
     face_verification_thresh = 0.0
     save_img = False
-    out, track_out, source, weights, view_img, save_txt, imgsz, ab_detect_hyp = \
-        opt['output'], opt['track_out'], opt['source'], opt['weights'], opt['view_img'], opt['save_txt'], opt['img_size'], opt['ab_detect_hyp']
+    out, track_out, source, weights, view_img, save_txt, imgsz, ab_detect_hyp,source = \
+        opt['output'], opt['track_out'], opt['source'], opt['weights'], opt['view_img'], opt['save_txt'], opt['img_size'], opt['ab_detect_hyp'],opt['source']
     webcam = source.isnumeric() or source.startswith('rtsp') or source.startswith('http') or source.endswith('.txt')
     if os.path.exists(track_out):
         shutil.rmtree(track_out)
@@ -2650,6 +2820,8 @@ def detect(opt,exp,args):
     if similarity_module_cfg.use_gpu:
         similarity_module = nn.DataParallel(similarity_module).cuda()
     similarity_module = similarity_module.eval()
+    # logger = logging.getLogger()
+    # logger.setLevel(logging.DEBUG)
 
     global current_video_segment_predicted_tracks
     global current_video_segment_predicted_tracks_bboxes
@@ -2669,12 +2841,13 @@ def detect(opt,exp,args):
     global frame_height
     global tracklet_len
 
-
     if not args.experiment_name:
         args.experiment_name = exp.exp_name # 'yolox_s_mix_det'
 
     output_dir = osp.join(exp.output_dir, args.experiment_name)#exp.output_dir='./YOLOX_outputs
     os.makedirs(output_dir, exist_ok=True)
+    file_name = os.path.join(exp.output_dir, args.experiment_name)
+    rank = args.local_rank
 
     if args.save_result:
         vis_folder = osp.join(output_dir, "track_vis")
@@ -2685,7 +2858,7 @@ def detect(opt,exp,args):
     args.device = torch.device("cuda" if args.device == "gpu" else "cpu")
 
     logger.info("Args: {}".format(args))
-
+    setup_logger(file_name, distributed_rank=rank, filename="val_log.txt", mode="a")
     if args.conf is not None:
         exp.test_conf = args.conf
     if args.nms is not None:
@@ -2693,41 +2866,42 @@ def detect(opt,exp,args):
     if args.tsize is not None:
         exp.test_size = (args.tsize, args.tsize)
 
-    model = exp.get_model().to(args.device)
-    logger.info("Model Summary: {}".format(get_model_info(model, exp.test_size)))
+    model = exp.get_model()
+    model.cuda()
     model.eval()
 
-    if not args.trt:
+    if not args.speed and not args.trt: # True
         if args.ckpt is None:
-            ckpt_file = osp.join(output_dir, "best_ckpt.pth.tar")
-        else:
+            ckpt_file = os.path.join(file_name, "best_ckpt.pth.tar")
+        else: # '../pretrained/bytetrack_x_mot20.tar'
             ckpt_file = args.ckpt
         logger.info("loading checkpoint")
-        ckpt = torch.load(ckpt_file, map_location="cpu")
+        loc = "cuda:{}".format(rank) # cuda:0
+        ckpt = torch.load(ckpt_file, map_location=loc)
         # load the model state dict
         model.load_state_dict(ckpt["model"])
         logger.info("loaded checkpoint done.")
 
+    logger.info("Model Summary: {}".format(get_model_info(model, exp.test_size)))
+    is_distributed = False  # gpu个数大于1的时候is_distributed为True
+    dataloader = exp.get_eval_loader(1, is_distributed, args.test)  # (1,False,False)
+
     if args.fuse:
         logger.info("\tFusing model...")
         model = fuse_model(model)
-
-    if args.fp16:
-        model = model.half()  # to FP16
-
-    if args.trt:
-        assert not args.fuse, "TensorRT model is not support model fusing!"
-        trt_file = osp.join(output_dir, "model_trt.pth")
-        assert osp.exists(
+    if args.trt: # False
+        assert (
+            not args.fuse and not is_distributed and args.batch_size == 1
+        ), "TensorRT model is not support model fusing and distributed inferencing!"
+        trt_file = os.path.join(file_name, "model_trt.pth")
+        assert os.path.exists(
             trt_file
-        ), "TensorRT model is not found!\n Run python3 tools/trt.py first!"
+        ), "TensorRT model is not found!\n Run tools/trt.py first!"
         model.head.decode_in_inference = False
         decoder = model.head.decode_outputs
-        logger.info("Using TensorRT to inference")
     else:
         trt_file = None
         decoder = None
-
 
     predictor = Predictor(model, exp, trt_file, decoder, args.device, args.fp16)
     current_time = time.localtime()
@@ -2742,8 +2916,7 @@ def detect(opt,exp,args):
     # # Load model
     # model = attempt_load(weights, map_location=device)  # load FP32 model
     # imgsz = check_img_size(imgsz, s=model.stride.max())  # check img_size
-    # if half:
-    #     model.half()  # to FP16
+
 
     pose_transform = transforms.Compose([
         transforms.ToTensor(),
@@ -2767,26 +2940,16 @@ def detect(opt,exp,args):
     # pattern = os.path.join(seq_path,phase,'*','img1')
 # for source in glob.glob(pattern):
     tracklet_pose_collection = []
-
-    imgsz = (896,1600)
-    if webcam: # False
-        view_img = True
-        cudnn.benchmark = True  # set True to speed up constant image size inference
-        dataset = LoadStreams(source, img_size=imgsz)
-    else:
-        save_img = True
-        dataset = LoadImages(source, img_size=imgsz)
-
+    # if half:
+    #     model.half()  # to FP16
+    tensor_type = torch.cuda.HalfTensor if half else torch.cuda.FloatTensor
+    model.eval()
+    if half:  # True
+        model = model.half()
     # Get names and colors
     names = ['person']
     # names = model.module.names if hasattr(model, 'module') else model.names
     colors = [[random.randint(0, 255) for _ in range(3)] for _ in range(len(names))]
-
-    # Run inference
-    t0 = time.time()
-    # img = torch.zeros((1, 3, imgsz, imgsz), device=device)  # init img
-    img = torch.zeros((1, 3, 896, 1600), device=device)  # init img
-    _ = model(img.half() if half else img) if device.type != 'cpu' else None  # run once
     ######################################################### detection #####################################################################
     tracklet_inner_cnt = 0  # tracklet_inner_cnt is an integer indicating the index of the last frame in current batch of frames for tracking, a batch of tracklet_len frames are processed together each time
 
@@ -2823,39 +2986,44 @@ def detect(opt,exp,args):
     current_video_segment_predicted_tracks_backup = {}
     current_video_segment_predicted_tracks_bboxes_backup = {}
     current_video_segment_representative_frames_backup = {}
-    total_frames = len(dataset.files)
+    total_frames = len(dataloader)
     batch_cnt = math.ceil((total_frames-1)/batch_stride)# 一共47+1个batch，429张图片, the last batch:5 frames
     unmatched_tracks_memory_dict = {} # 记忆轨迹unmatched的次数，超过一定次数之后舍弃轨迹
-    for path, img, im0s, vid_cap in dataset: # check whether in reasonable order
+    # for path, img, im0s, vid_cap in dataset: # check whether in reasonable order
+    img_size = exp.test_size # (896,1600)
+    data_list = []
+    for imgs, _, info_imgs, ids in dataloader:
+        # for cur_iter, (imgs, _, info_imgs, ids) in enumerate(
+        #     progress_bar(self.dataloader)
+        # ): 
+        with torch.no_grad():
+            gc.collect()
+            torch.cuda.empty_cache()
 
-        gc.collect()
-        torch.cuda.empty_cache()
+            frame_width,frame_height = info_imgs[1],info_imgs[0]
+            img_file_name = info_imgs[4]
+            imgs = imgs.type(tensor_type)  # 对imgs类型进行转换
+            # imgs_byte = torch.load('/home/allenyljiang/Documents/ByteTrack-main/saved_variables/imgs.pt')
+            # print(imgs.equal(imgs_byte))
 
-        frame_width,frame_height = im0s.shape[1],im0s.shape[0]
-        pose_preds = np.empty(shape=[0, 0])
-        pose_confidences = np.empty(shape=[0, 0])
-        img = torch.from_numpy(img).to(device)
-        img = img.half() if half else img.float()  # uint8 to fp16/32
-        img /= 255.0  # 0 - 255 to 0.0 - 1.0
-        if img.ndimension() == 3:
-            img = img.unsqueeze(0)
-
-        # Inference
-        t1 = time_synchronized()
-        # pred = model(img, augment=opt['augment'])[0]
-        pred = model(img) # (1,10710,6)
-        num_classes = 1
-        confthre = 0.01
-        nmsthre = 0.7
-        pred = postprocess(pred, num_classes, confthre, nmsthre)
-
+            # Inference
+            t1 = time_synchronized()
+            # pred = model(img, augment=opt['augment'])[0]
+            pred = model(imgs) # (1,10710,6)
+            num_classes = 1
+            confthre = 0.01
+            nmsthre = 0.7
+            # byte_pred =  torch.load('/home/allenyljiang/Documents/ByteTrack-main/saved_variables/outputs.pt')
+            # print(pred[0].equal(byte_pred))
+            pred = postprocess(pred, num_classes, confthre, nmsthre)
+            # byte_pred1 = torch.load('/home/allenyljiang/Documents/ByteTrack-main/saved_variables/outputs1.pt')
+            # # pred[0].equal(byte_pred) # 比较两个张量是否相等
+            # print(pred[0].equal(byte_pred1))# 逐元素判断
+        output_results = convert_to_coco_format(dataloader,pred, info_imgs, ids)  # 当前帧以COCO形式存储的数据
+        data_list.extend(output_results)
         # Apply NMS
         # pred = non_max_suppression(pred, opt['conf_thres'], opt['iou_thres'], classes=opt['classes'], agnostic=opt['agnostic_nms']) # (32,6)
         t2 = time_synchronized()
-
-        # Apply Classifier
-        if classify:
-            pred = apply_classifier(pred, modelc, img, im0s)
 
         # Process detections
         box_detected = []
@@ -2877,7 +3045,9 @@ def detect(opt,exp,args):
         #     tracklet_inner_cnt = len(tracklet_pose_collection)
         # 使用自带detector
         # 每次只保存当前batch的结果
-        tracklet_pose_collection = conduct_pose_estimation(webcam, path, out, im0s, pred, img, dataset, save_txt, save_img, view_img, box_detected, head_box_detected, foreignmatter_box_detected, box_confidence_scores, head_box_confidence_scores, foreignmatter_box_confidence_scores, centers, scales, vid_path, vid_writer, vid_cap, tracklet_pose_collection, names, colors, pose_transform, bbox_confidence_threshold, tracklet_inner_cnt, need_face_recognition_switch, face_verification_thresh, opt['iou_thres'])
+        # tracklet_pose_collection = conduct_pose_estimation(webcam, path, out, im0s, pred, img, dataset, save_txt, save_img, view_img, box_detected, head_box_detected, foreignmatter_box_detected, box_confidence_scores, head_box_confidence_scores, foreignmatter_box_confidence_scores, centers, scales, vid_path, vid_writer, vid_cap, tracklet_pose_collection, names, colors, pose_transform, bbox_confidence_threshold, tracklet_inner_cnt, need_face_recognition_switch, face_verification_thresh, opt['iou_thres'])
+        ############ tracklet pose collection #########
+        tracklet_pose_collection = tracklet_collection(dataloader,img_size,pred, info_imgs, ids, box_detected, box_confidence_scores, tracklet_pose_collection, bbox_confidence_threshold, tracklet_inner_cnt,source)
         # tracklet_pose_collection_tmp = json.loads(det.readline())
         # tracklet_pose_collection.append(tracklet_pose_collection_tmp)
         if total_frames <= tracklet_len: # 不足一个batch
@@ -2897,6 +3067,7 @@ def detect(opt,exp,args):
                 tracklet_pose_collection[0:batch_stride] = []
                 tracklet_len = len(tracklet_pose_collection)
 
+    # eval_results = evaluate_prediction(dataloader,data_list)
             # tracklet_pose_collection.pop(0)
         # if len(tracklet_pose_collection) > tracklet_len and tracklet_pose_collection[-1] != [] and abs(int(tracklet_pose_collection[-1]['img_dir'].split('/')[-1][:-4]) - int(tracklet_pose_collection[-2]['img_dir'].split('/')[-1][:-4])) >= temporal_length_thresh_inside_tracklet:
         #     tracklet_pose_collection_large_temporal_stride_buffer.append(tracklet_pose_collection[-1])
@@ -3140,7 +3311,8 @@ def detect(opt,exp,args):
             ##################################################################################################################################
             ############################ organize graph and call #############################################################################
             # time_start = time.time()
-            if int(mapping_node_id_to_bbox[max([x for x in mapping_node_id_to_bbox])][2][:-4]) == len(dataset.files) - 1 and len(mapping_node_id_to_bbox) == 0 and len(mapping_edge_id_to_cost) == 0:
+            # if int(mapping_node_id_to_bbox[max([x for x in mapping_node_id_to_bbox])][2][:-4]) == len(dataset.files) - 1 and len(mapping_node_id_to_bbox) == 0 and len(mapping_edge_id_to_cost) == 0:
+            if int(mapping_node_id_to_bbox[max([x for x in mapping_node_id_to_bbox])][2][:-4]) == len(dataloader) - 1 and len(mapping_node_id_to_bbox) == 0 and len(mapping_edge_id_to_cost) == 0:
                 break
             # time_start = time.time()
             result = tracking(mapping_node_id_to_bbox, mapping_edge_id_to_cost, tracklet_inner_cnt) # tracking函数为ssp算法实现
@@ -3516,7 +3688,7 @@ if __name__ == '__main__':
     exp_file = None
     exp = get_exp(exp_file,opt['name'])
     opt['cfg'] = r'/usr/local/lpn-pytorch-master/lpn-pytorch-master/experiments/coco/lpn/lpn101_256x192_gd256x2_gc.yaml'
-    opt['source'] = '/home/allenyljiang/Documents/Dataset/MOT20/train/MOT20-01/img1' # r'/media/allenyljiang/Seagate_Backup_Plus_Drive/usr/local/VIBE-master/data/neurocomputing/05_0019'
+    opt['source'] = '/home/allenyljiang/Documents/Dataset/MOT20/test/MOT20-06/img1' # r'/media/allenyljiang/Seagate_Backup_Plus_Drive/usr/local/VIBE-master/data/neurocomputing/05_0019'
     # opt['source'] = input_opt.source # r'/media/allenyljiang/Seagate_Backup_Plus_Drive/usr/local/VIBE-master/data/neurocomputing/05_0019'
     opt['modelDir'] = ''
     opt['logDir'] = ''

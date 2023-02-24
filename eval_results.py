@@ -5,7 +5,7 @@ import numpy as np
 metrics = list(mm.metrics.motchallenge_metrics)  # # 即支持的所有metrics的名字列表
 print(metrics)
 acc = mm.MOTAccumulator(auto_id=True) # 创建accumulator
-gt_file= '/home/allenyljiang/Documents/Dataset/MOT15/train/ADL-Rundle-6/gt/gt.txt'
+gt_file= "/home/allenyljiang/Documents/Dataset/MOT20/train/MOT20-01/gt/gt.txt"
 # "/home/allenyljiang/Documents/Dataset/MOT16/train/MOT16-02/gt.txt"
 """  文件格式如下
 1,0,1255,50,71,119,1,1,1
@@ -14,7 +14,7 @@ gt_file= '/home/allenyljiang/Documents/Dataset/MOT15/train/ADL-Rundle-6/gt/gt.tx
 ...
 """
 
-ts_file= '/home/allenyljiang/Documents/Dataset/MOT15/tracker/data/ADL-Rundle-6.txt'
+ts_file= '/home/allenyljiang/Documents/Dataset/MOT20/train/MOT20-01/results_all/MOT20-01.txt'
 # "/home/allenyljiang/Documents/Dataset/MOT16/train/MOT16-02/results_all/track.txt"
 """  文件格式如下
 1,1,1240.0,40.0,120.0,96.0,0.999998,-1,-1,-1

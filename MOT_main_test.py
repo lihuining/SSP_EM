@@ -143,7 +143,7 @@ median_filter_radius = 4
 num_samples_around_each_joint = 3
 maximum_possible_number = math.exp(10)
 average_sampling_density_hori_vert = 7
-bbox_confidence_threshold = 0.6 #5 # 0.45
+bbox_confidence_threshold = 0.2 #5 # 0.45
 head_bbox_confidence_threshold = 0.55 # 0.6 # 0.45
 temporal_length_thresh_inside_tracklet = 5
 tracklet_confidence_threshold = 0.6
@@ -3601,7 +3601,7 @@ if __name__ == '__main__':
     exp_file = None
     exp = get_exp(exp_file,opt['name'])
     opt['cfg'] = r'/usr/local/lpn-pytorch-master/lpn-pytorch-master/experiments/coco/lpn/lpn101_256x192_gd256x2_gc.yaml'
-    opt['source'] = '/home/allenyljiang/Documents/Dataset/MOT20/test/MOT20-04/img1' # r'/media/allenyljiang/Seagate_Backup_Plus_Drive/usr/local/VIBE-master/data/neurocomputing/05_0019'
+    opt['source'] = '/home/allenyljiang/Documents/Dataset/MOT20/test/MOT20-08/img1' # r'/media/allenyljiang/Seagate_Backup_Plus_Drive/usr/local/VIBE-master/data/neurocomputing/05_0019'
     # opt['source'] = input_opt.source # r'/media/allenyljiang/Seagate_Backup_Plus_Drive/usr/local/VIBE-master/data/neurocomputing/05_0019'
     opt['modelDir'] = ''
     opt['logDir'] = ''
@@ -3666,7 +3666,7 @@ if __name__ == '__main__':
     # for stat in top_stats:
     #     print(stat)
 # 运行时间分析
-# pyinstrument -r html MOT_demo_v14_based_on_reid_v22_notstandard_yolov5_add_face_remove_skeleton_ref_v7.py
+# pyinstrument -r html MOT_main_test.py
 # 内存监测
 #  python -m memory_profiler MOT_demo_v14_based_on_reid_v22_notstandard_yolov5_add_face_remove_skeleton_ref.py
 '''

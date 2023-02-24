@@ -53,16 +53,20 @@ max_height_list = []
 min_width_list = []
 max_width_list = []
 aspect_ratio_var_list = []
+average_moving_pixel = []
+step = 10
 for track_id in range(len(unique_track_id)): # 每一条轨迹
     # 轨迹名称
     # unique_track_id[track_id]
-    # print(unique_track_id[track_id])
+    print(unique_track_id[track_id])
     x = track_seq[track_seq[:,1] == unique_track_id[track_id],0] # 自变量,所在帧
     frame_dict[track_id] = x
     frame_mask.append(1 if int(sum(x[1:]-x[0:-1])) == (len(x)-1) else 0)
     # img_id = len(track_seq[track_seq[:,1] == unique_track_id[track_id],0]) # 自变量
     dets = track_seq[track_seq[:, 1]== unique_track_id[track_id], 2:6]
     centers = 1/2*dets[:, 2:4] + dets[:, 0:2]
+    center_moving = np.abs(centers[step-1::step,:] - centers[:-step+1:step,:])
+    average_moving_pixel.append(np.min(np.max(center_moving,1)))
     polyfit_x = copy.deepcopy(x)
     polyfit_y = centers[:,0]
     polyfit_z = centers[:,1]
@@ -98,7 +102,7 @@ for track_id in range(len(unique_track_id)): # 每一条轨迹
     #     iou_similarity_list.append(iou_similarity)
     # print('single mean',np.mean(iou_similarity_list))
     # print('single variance',np.var(iou_similarity_list))
-
+print(min(average_moving_pixel))
 print('min aspect ratio is {},min width is {},min height is {}'.format(np.min(min_aspect_ratio_list),np.min(min_width_list),np.min(min_height_list)))
 print('max aspect ratio is {},max width is {},max height is {}'.format(np.max(max_aspect_ratio_list),np.max(max_width_list),np.max(max_height_list)))
 
@@ -116,7 +120,7 @@ print('max aspect ratio is {},max width is {},max height is {}'.format(np.max(ma
 # cv2.imwrite(dst_path,img)
 # print(track_length_list)
 ### 轨迹统计误差的计算  ###
-# node_id_frame = int(mapping_node_id_to_bbox[node_id][2].split('.')[0])
+# node_id_frame =
 # node_id_center = [(mapping_node_id_to_bbox[node_id][0][0][0] + mapping_node_id_to_bbox[node_id][0][1][0]) / 2,
 #                   (mapping_node_id_to_bbox[node_id][0][0][1] + mapping_node_id_to_bbox[node_id][0][1][1]) / 2]
 # polyfit_x = [x for x in predicted_tracks_centers[track_id].keys()]  # 以所在的帧数作为自变量

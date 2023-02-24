@@ -511,7 +511,7 @@ def compute_iou_between_body_and_head(head_box_detected, box_detected):#[(left, 
                 corresponding_coefficient_matrix[idx_row, idx_col] = 0.0
     return corresponding_coefficient_matrix
 
-def compute_iou_between_bbox_list(head_box_detected, box_detected):#[(left, top), (right, bottom)]
+def compute_iou_between_bbox_list(head_box_detected, box_detected): #[(left, top), (right, bottom)]
     corresponding_coefficient_matrix = np.zeros((len(head_box_detected), len(box_detected)))
     for idx_row in range(len(head_box_detected)):
         for idx_col in range(len(box_detected)):

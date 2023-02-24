@@ -23,6 +23,7 @@ from PIL import Image as Img
 from PIL import ImageTk
 import cv2
 import torch
+torch.cuda.empty_cache()
 import torch.backends.cudnn as cudnn
 import torch.optim
 import torch.utils.data
@@ -91,7 +92,7 @@ dump_further_switch_20211011 = 0
 dump_further_switch_optimizer = 0
 dump_stitching_tracklets_switch = 0
 import codecs
-from fix_trajs_v4 import *
+from fix_trajs_v5 import *
 
 from botorch.models import SingleTaskGP
 from botorch.fit import fit_gpytorch_model
@@ -99,6 +100,20 @@ from botorch.utils import standardize
 from gpytorch.mlls import ExactMarginalLogLikelihood
 from botorch.acquisition import UpperConfidenceBound
 from botorch.optim import optimize_acqf
+##### yolox #####
+
+from yolox.core import launch
+from yolox.exp import get_exp
+from yolox.utils import configure_nccl, fuse_model, get_local_rank, get_model_info, setup_logger
+from yolox.evaluators import MOTEvaluator
+from yolox.utils import (
+    gather,
+    is_main_process,
+    postprocess,
+    synchronize,
+    time_synchronized,
+    xyxy2xywh
+)
 #################################################### detector related import end ########################################################################
 
 current_video_segment_predicted_tracks = {}
@@ -118,12 +133,12 @@ tracklet_pose_collection_large_temporal_stride_buffer = []
 curr_batch_img_buffer = {}
 # result_dict = {}
 
-tracklet_len = 15 # 滑动窗口长度
+tracklet_len = 10 # 滑动窗口长度
 median_filter_radius = 4
 num_samples_around_each_joint = 3
 maximum_possible_number = math.exp(10)
 average_sampling_density_hori_vert = 7
-bbox_confidence_threshold = 0.4 #5 # 0.45
+bbox_confidence_threshold = 0.2 #5 # 0.45
 head_bbox_confidence_threshold = 0.55 # 0.6 # 0.45
 temporal_length_thresh_inside_tracklet = 5
 tracklet_confidence_threshold = 0.6
@@ -146,11 +161,8 @@ batch_id = 0
 frame_height = 0
 frame_width = 0
 skeletons = [[15, 13], [13, 11], [16, 14], [14, 12], [11, 12], [5, 11], [6, 12], [5, 6], [5, 7], [6, 8], [7, 9], [8, 10], [1, 2], [0, 1], [0, 2], [1, 3], [2, 4], [3, 5], [4, 6]]
-batch_stride = tracklet_len 
+batch_stride = tracklet_len - 1
 batch_stride_write = tracklet_len - 1
-det_cnt = 0 # counting the number of detections
-frame_cnt = 0
-det_cnt_frame_list = []
 foreign_matter_cls_id_dict = {
 'bicycle': 1,
 'motorcycle': 3,
@@ -162,6 +174,305 @@ np.warnings.filterwarnings('ignore',category=np.VisibleDeprecationWarning)
 # warnings.filterwarnings('ignore')
 
 # np.warnings.filterwarnings('ignore',category=np.RankWarning)
+
+IMAGE_EXT = [".jpg", ".jpeg", ".webp", ".bmp", ".png"]
+
+'''
+-f
+../exps/example/mot/yolox_x_mix_mot20_ch.py
+-c
+../pretrained/bytetrack_x_mot20.tar
+-b
+1
+-d
+1
+--fp16
+--fuse
+--match_thresh
+0.7
+--mot20
+'''
+def make_parser():
+    # python tools/demo_track.py -h 查看帮助信息/--help
+    # 使用时顺序无关紧要
+    parser = argparse.ArgumentParser("ByteTrack Demo!") # 创建解析对象
+    # -- 表示可选参数，其余表示必选参数
+    parser.add_argument(
+        "--demo", default="image", help="demo type, eg. image, video and webcam"
+    )
+    parser.add_argument("-expn", "--experiment-name", type=str, default=None)
+    parser.add_argument("-n", "--name", type=str, default=None, help="model name")
+
+    parser.add_argument(
+        "--path", default="/home/allenyljiang/Documents/Dataset/MOT20/train/MOT20-01/img1", help="path to images or video"
+    )
+    parser.add_argument("--camid", type=int, default=0, help="webcam demo camera id")
+    parser.add_argument(
+        "--save_result",
+        action="store_true",
+        help="whether to save the inference result of image/video",
+    )# action表示--save_result标志存在时赋值为"store_true"
+
+    # exp file
+    parser.add_argument(
+        "-f",# 短选项，使用-f/--exp_file均可
+        "--exp_file",
+        default='exps/example/mot/yolox_x_mix_mot20_ch.py',
+        type=str,
+        help="pls input your expriment description file",
+    )
+    parser.add_argument("-c", "--ckpt", default='weights/bytetrack_x_mot20.tar', type=str, help="ckpt for eval")
+    parser.add_argument(
+        "--device",
+        default="gpu",
+        type=str,
+        help="device to run our model, can either be cpu or gpu",
+    )
+    parser.add_argument("--conf", default=None, type=float, help="test conf")
+    parser.add_argument("--nms", default=None, type=float, help="test nms threshold")
+    parser.add_argument("--tsize", default=None, type=int, help="test img size")
+    parser.add_argument("--fps", default=30, type=int, help="frame rate (fps)")
+    parser.add_argument(
+        "--fp16",
+        dest="fp16",
+        default= True,
+        # action="store_true",
+        help="Adopting mix precision evaluating.",
+    )
+    parser.add_argument(
+        "--fuse",
+        dest="fuse",
+        default= True,
+        # action="store_true",
+        help="Fuse conv and bn for testing.",
+    )
+    parser.add_argument(
+        "--trt",
+        dest="trt",
+        default=False,
+        action="store_true",
+        help="Using TensorRT model for testing.",
+    )
+    # # tracking args
+    # parser.add_argument("--track_thresh", type=float, default=0.5, help="tracking confidence threshold")
+    # parser.add_argument("--track_buffer", type=int, default=30, help="the frames for keep lost tracks")
+    # parser.add_argument("--match_thresh", type=float, default=0.8, help="matching threshold for tracking")
+    # parser.add_argument(
+    #     "--aspect_ratio_thresh", type=float, default=1.6,
+    #     help="threshold for filtering out boxes of which aspect ratio are above the given value."
+    # )
+    # parser.add_argument('--min_box_area', type=float, default=10, help='filter out tiny boxes')
+    # parser.add_argument("--mot20", dest="mot20", default=False, action="store_true", help="test mot20.")
+    return parser
+
+
+def get_image_list(path):
+    image_names = []
+    for maindir, subdir, file_name_list in os.walk(path):
+        for filename in file_name_list:
+            apath = osp.join(maindir, filename)
+            ext = osp.splitext(apath)[1]
+            if ext in IMAGE_EXT:
+                image_names.append(apath)
+    return image_names
+
+
+def write_results(filename, results):
+    save_format = '{frame},{id},{x1},{y1},{w},{h},{s},-1,-1,-1\n'
+    with open(filename, 'w') as f:
+        for frame_id, tlwhs, track_ids, scores in results:
+            for tlwh, track_id, score in zip(tlwhs, track_ids, scores):
+                if track_id < 0:
+                    continue
+                x1, y1, w, h = tlwh
+                line = save_format.format(frame=frame_id, id=track_id, x1=round(x1, 1), y1=round(y1, 1), w=round(w, 1), h=round(h, 1), s=round(score, 2))
+                f.write(line)
+    logger.info('save results to {}'.format(filename))
+
+
+class Predictor(object):
+    def __init__(
+        self,
+        model,
+        exp,
+        trt_file=None,
+        decoder=None,
+        device=torch.device("cpu"),
+        fp16=False
+    ):
+        self.model = model
+        self.decoder = decoder
+        self.num_classes = exp.num_classes
+        self.confthre = exp.test_conf
+        self.nmsthre = exp.nmsthre
+        self.test_size = exp.test_size
+        self.device = device
+        self.fp16 = fp16
+        if trt_file is not None:
+            from torch2trt import TRTModule
+
+            model_trt = TRTModule()
+            model_trt.load_state_dict(torch.load(trt_file))
+
+            x = torch.ones((1, 3, exp.test_size[0], exp.test_size[1]), device=device)
+            self.model(x)
+            self.model = model_trt
+        self.rgb_means = (0.485, 0.456, 0.406)
+        self.std = (0.229, 0.224, 0.225)
+
+    def inference(self, img, timer):
+        img_info = {"id": 0}
+        if isinstance(img, str):
+            img_info["file_name"] = osp.basename(img)
+            img = cv2.imread(img)
+        else:
+            img_info["file_name"] = None
+
+        height, width = img.shape[:2]
+        img_info["height"] = height
+        img_info["width"] = width
+        img_info["raw_img"] = img
+
+        img, ratio = preproc(img, self.test_size, self.rgb_means, self.std)
+        img_info["ratio"] = ratio
+        img = torch.from_numpy(img).unsqueeze(0).float().to(self.device)
+        if self.fp16:
+            img = img.half()  # to FP16
+
+        with torch.no_grad():
+            timer.tic()
+            outputs = self.model(img)
+            if self.decoder is not None:
+                outputs = self.decoder(outputs, dtype=outputs.type())
+            outputs = postprocess(
+                outputs, self.num_classes, self.confthre, self.nmsthre
+            )
+            #logger.info("Infer time: {:.4f}s".format(time.time() - t0))
+        return outputs, img_info
+
+
+def image_demo(predictor, vis_folder, current_time, args):
+    if osp.isdir(args.path):
+        files = get_image_list(args.path)
+    else:
+        files = [args.path]
+    files.sort()
+    tracker = BYTETracker(args, frame_rate=args.fps)
+    timer = Timer()
+    results = []
+
+    for frame_id, img_path in enumerate(files, 1):
+        outputs, img_info = predictor.inference(img_path, timer)
+        if outputs[0] is not None:
+            online_targets = tracker.update(outputs[0], [img_info['height'], img_info['width']], exp.test_size)
+            online_tlwhs = []
+            online_ids = []
+            online_scores = []
+            for t in online_targets:
+                tlwh = t.tlwh
+                tid = t.track_id
+                vertical = tlwh[2] / tlwh[3] > args.aspect_ratio_thresh
+                if tlwh[2] * tlwh[3] > args.min_box_area and not vertical:
+                    online_tlwhs.append(tlwh)
+                    online_ids.append(tid)
+                    online_scores.append(t.score)
+                    # save results
+                    results.append(
+                        f"{frame_id},{tid},{tlwh[0]:.2f},{tlwh[1]:.2f},{tlwh[2]:.2f},{tlwh[3]:.2f},{t.score:.2f},-1,-1,-1\n"
+                    )
+            timer.toc()
+            online_im = plot_tracking(
+                img_info['raw_img'], online_tlwhs, online_ids, frame_id=frame_id, fps=1. / timer.average_time
+            )
+        else:
+            timer.toc()
+            online_im = img_info['raw_img']
+
+        # result_image = predictor.visual(outputs[0], img_info, predictor.confthre)
+        if args.save_result:
+            timestamp = time.strftime("%Y_%m_%d_%H_%M_%S", current_time)
+            save_folder = osp.join(vis_folder, timestamp)
+            os.makedirs(save_folder, exist_ok=True)
+            cv2.imwrite(osp.join(save_folder, osp.basename(img_path)), online_im)
+
+        if frame_id % 20 == 0:
+            logger.info('Processing frame {} ({:.2f} fps)'.format(frame_id, 1. / max(1e-5, timer.average_time)))
+
+        ch = cv2.waitKey(0)
+        if ch == 27 or ch == ord("q") or ch == ord("Q"):
+            break
+
+    if args.save_result:
+        res_file = osp.join(vis_folder, f"{timestamp}.txt")
+        with open(res_file, 'w') as f:
+            f.writelines(results)
+        logger.info(f"save results to {res_file}")
+
+
+def imageflow_demo(predictor, vis_folder, current_time, args):
+    cap = cv2.VideoCapture(args.path if args.demo == "video" else args.camid)
+    width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)  # float
+    height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)  # float
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    timestamp = time.strftime("%Y_%m_%d_%H_%M_%S", current_time)
+    save_folder = osp.join(vis_folder, timestamp)
+    os.makedirs(save_folder, exist_ok=True)
+    if args.demo == "video":
+        save_path = osp.join(save_folder, args.path.split("/")[-1])
+    else:
+        save_path = osp.join(save_folder, "camera.mp4")
+    logger.info(f"video save_path is {save_path}")
+    vid_writer = cv2.VideoWriter(
+        save_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (int(width), int(height))
+    )
+    tracker = BYTETracker(args, frame_rate=30)
+    timer = Timer()
+    frame_id = 0
+    results = []
+    while True:
+        if frame_id % 20 == 0:
+            logger.info('Processing frame {} ({:.2f} fps)'.format(frame_id, 1. / max(1e-5, timer.average_time)))
+        ret_val, frame = cap.read()
+        if ret_val:
+            outputs, img_info = predictor.inference(frame, timer)
+            if outputs[0] is not None:
+                online_targets = tracker.update(outputs[0], [img_info['height'], img_info['width']], exp.test_size)
+                online_tlwhs = []
+                online_ids = []
+                online_scores = []
+                for t in online_targets:
+                    tlwh = t.tlwh
+                    tid = t.track_id
+                    vertical = tlwh[2] / tlwh[3] > args.aspect_ratio_thresh
+                    if tlwh[2] * tlwh[3] > args.min_box_area and not vertical:
+                        online_tlwhs.append(tlwh)
+                        online_ids.append(tid)
+                        online_scores.append(t.score)
+                        results.append(
+                            f"{frame_id},{tid},{tlwh[0]:.2f},{tlwh[1]:.2f},{tlwh[2]:.2f},{tlwh[3]:.2f},{t.score:.2f},-1,-1,-1\n"
+                        )
+                timer.toc()
+                online_im = plot_tracking(
+                    img_info['raw_img'], online_tlwhs, online_ids, frame_id=frame_id + 1, fps=1. / timer.average_time
+                )
+            else:
+                timer.toc()
+                online_im = img_info['raw_img']
+            if args.save_result:
+                vid_writer.write(online_im)
+            ch = cv2.waitKey(1)
+            if ch == 27 or ch == ord("q") or ch == ord("Q"):
+                break
+        else:
+            break
+        frame_id += 1
+
+    if args.save_result:
+        res_file = osp.join(vis_folder, f"{timestamp}.txt")
+        with open(res_file, 'w') as f:
+            f.writelines(results)
+        logger.info(f"save results to {res_file}")
+
 def tracemalloc_snapshot(snapshot1):
     snapshot2 = tracemalloc.take_snapshot()
     top_stats = snapshot2.compare_to(snapshot1, 'lineno')
@@ -331,19 +642,20 @@ def compute_iou_single_box(curr_img_boxes, next_img_boxes):# Order: top, bottom,
 
 def convert_node_ids(mapping_node_id_to_bbox, mapping_edge_id_to_cost):
     src_id = 1
-    dst_id = 2 * max(mapping_node_id_to_bbox) + 2
+    dst_id = 2 * max(mapping_node_id_to_bbox) + 2 # 其余node变成了2×node，2×node+1
     result_mapping_node_id_to_bbox = {}
     result_mapping_node_id_to_bbox_str = ''
     # Allen: make sure that even a traj with only 2 nodes and one edge can be involved
     most_unreliable_edge_cost = max([mapping_edge_id_to_cost[x] for x in mapping_edge_id_to_cost])
     even_node_cost = math.log(1.0 / 2 / 1.0)
     src_dst_node_cost = math.log(maximum_possible_number)
-    even_node_cost_add = -abs(2 * src_dst_node_cost + even_node_cost) - 0.1 # -abs(2 * src_dst_node_cost + most_unreliable_edge_cost + 2 * even_node_cost) / 2 - 0.1
+    # even_node_cost_add = -abs(2 * src_dst_node_cost + even_node_cost) - 0.1 # -abs(2 * src_dst_node_cost + most_unreliable_edge_cost + 2 * even_node_cost) / 2 - 0.1
+    even_node_cost_add = -abs(2 * src_dst_node_cost + even_node_cost)-0.1  # -abs(2 * src_dst_node_cost + most_unreliable_edge_cost + 2 * even_node_cost) / 2 - 0.1
 
     for mapping_node_id_to_bbox_key in mapping_node_id_to_bbox:
-        result_mapping_node_id_to_bbox[str(src_id)+'_'+str(int(mapping_node_id_to_bbox_key) * 2)] = math.log(maximum_possible_number)
-        result_mapping_node_id_to_bbox[str(int(mapping_node_id_to_bbox_key) * 2)+'_'+str(int(mapping_node_id_to_bbox_key) * 2 + 1)] = math.log(1.0 / 2 / 1.0)+even_node_cost_add# math.log(1.0 / 2 / mapping_node_id_to_bbox[mapping_node_id_to_bbox_key][1])
-        result_mapping_node_id_to_bbox[str(int(mapping_node_id_to_bbox_key) * 2 + 1)+'_'+str(dst_id)] = math.log(maximum_possible_number)
+        result_mapping_node_id_to_bbox[str(src_id)+'_'+str(int(mapping_node_id_to_bbox_key) * 2)] = math.log(maximum_possible_number) # 源到该节点
+        result_mapping_node_id_to_bbox[str(int(mapping_node_id_to_bbox_key) * 2)+'_'+str(int(mapping_node_id_to_bbox_key) * 2 + 1)] = math.log(1.0 / 2 / 1.0)+even_node_cost_add # 该节点自身cost         math.log(1.0 / 2 / mapping_node_id_to_bbox[mapping_node_id_to_bbox_key][1])
+        result_mapping_node_id_to_bbox[str(int(mapping_node_id_to_bbox_key) * 2 + 1)+'_'+str(dst_id)] = math.log(maximum_possible_number) # 该节点到汇节点的cost
         result_mapping_node_id_to_bbox_str += ('a*' + str(src_id)+'*'+str(int(mapping_node_id_to_bbox_key) * 2) + '*' + str(math.log(maximum_possible_number)) + '~')
         result_mapping_node_id_to_bbox_str += ('a*' + str(int(mapping_node_id_to_bbox_key) * 2)+'*'+str(int(mapping_node_id_to_bbox_key) * 2 + 1) + '*' + str(math.log(1.0 / 2 / 1.0)+even_node_cost_add) + '~') # str(math.log(1.0 / 2 / mapping_node_id_to_bbox[mapping_node_id_to_bbox_key][1])) + '~')
         result_mapping_node_id_to_bbox_str += ('a*' + str(int(mapping_node_id_to_bbox_key) * 2 + 1)+'*'+str(dst_id) + '*' + str(math.log(maximum_possible_number)) + '~')
@@ -468,8 +780,11 @@ def tracking(mapping_node_id_to_bbox, mapping_edge_id_to_cost, tracklet_inner_cn
         json.dump(transfer_data_to_tracker, codecs.open(out_file, 'w', encoding='utf-8'), separators=(',', ':'), sort_keys=True)
 
     tracking_start_time = time.time()
+    gc.collect()
     p = Popen('call/call', stdin=PIPE, stdout=PIPE, encoding='gbk')
     result = p.communicate(input=transfer_data_to_tracker)
+    p.terminate()
+    p.wait()
     result = [result[0], result[1]]
 
     if dump_further_switch_optimizer == 1:
@@ -528,9 +843,6 @@ def conduct_pose_estimation(webcam, path, out, im0s, pred, img, dataset, save_tx
     # img - current image array with shape 1x3x1088x1920
     # tracklet_inner_cnt - index of frame
     # pose_model, pose_transform - model for pose estimation
-    global det_cnt_frame_list
-    global det_cnt
-    global frame_cnt
     for i, det in enumerate(pred):  # detections per image
         if webcam:  # batch_size >= 1
             p, s, im0 = path[i], '%g: ' % i, im0s[i].copy()
@@ -562,15 +874,17 @@ def conduct_pose_estimation(webcam, path, out, im0s, pred, img, dataset, save_tx
                     plot_one_box(xyxy, im0, label=label, color=colors[int(cls)], line_thickness=3)
                 ######################################################### pose estimation #########################################################
                 if int(cls.data.cpu().numpy()) == 0:
-
-                    width = abs(xyxy[2] - xyxy[0])
-                    height = abs(xyxy[3] - xyxy[1])
-                    if width*height < 100:
-                        continue
                     # if min([float(xyxy[3].data.cpu().numpy()), float(xyxy[1].data.cpu().numpy())]) - 0.0 > abs(float(xyxy[3].data.cpu().numpy())-float(xyxy[1].data.cpu().numpy())) and im0s.shape[0] - max([float(xyxy[3].data.cpu().numpy()), float(xyxy[1].data.cpu().numpy())]) > abs(float(xyxy[3].data.cpu().numpy())-float(xyxy[1].data.cpu().numpy())) and \
                     #     min([float(xyxy[2].data.cpu().numpy()), float(xyxy[0].data.cpu().numpy())]) - 0.0 > abs(float(xyxy[2].data.cpu().numpy())-float(xyxy[0].data.cpu().numpy())) and im0s.shape[1] - max([float(xyxy[2].data.cpu().numpy()), float(xyxy[0].data.cpu().numpy())]) > abs(float(xyxy[2].data.cpu().numpy())-float(xyxy[0].data.cpu().numpy())) and \
                     #     max([abs(float(xyxy[3].data.cpu().numpy())-float(xyxy[1].data.cpu().numpy())), abs(float(xyxy[2].data.cpu().numpy())-float(xyxy[0].data.cpu().numpy()))]) < 50: # and \
-                    #     continue   
+                    #     continue
+                    statistic_information_dict = {'aspect ratio': [0.51, 6.24], 'width': [33, 165], 'height': [34, 284]}
+                    width = abs(xyxy[2] - xyxy[0])
+                    height = abs(xyxy[3] - xyxy[1])
+                    #### 此处统计的信息不准确 #####
+                    # if width > statistic_information_dict['width'][1] or width < statistic_information_dict['width'][0] or height > statistic_information_dict['height'][1] or height < statistic_information_dict['height'][0]:
+                    if width > statistic_information_dict['width'][1] or width < statistic_information_dict['width'][0]  or height < statistic_information_dict['height'][0]:
+                        continue
                     box_detected.append([(float(xyxy[0].data.cpu().numpy()), float(xyxy[1].data.cpu().numpy())), (float(xyxy[2].data.cpu().numpy()), float(xyxy[3].data.cpu().numpy()))])
                     box_confidence_scores.append(float(conf.data.cpu().numpy()) + 1e-4*random.random())
                 if int(cls.data.cpu().numpy()) == 1:#body
@@ -676,29 +990,7 @@ def conduct_pose_estimation(webcam, path, out, im0s, pred, img, dataset, save_tx
     tracklet_pose_collection_tmp['foreignmatter_bbox_list'] = []
     tracklet_pose_collection_tmp['foreignmatter_box_confidence_scores'] = []
     tracklet_pose_collection.append(tracklet_pose_collection_tmp)
-    # img = cv2.imread(path)
-    # if not os.path.exists(os.path.join('/home/allenyljiang/Documents/Dataset/MOT20/train/MOT20-01/'+ 'detect'+str(bbox_confidence_threshold)+'/')):
-    #     os.makedirs(os.path.join('/home/allenyljiang/Documents/Dataset/MOT20/train/MOT20-01/'+ 'detect'+str(bbox_confidence_threshold)+'/'))
-    # dstfile = os.path.join('/home/allenyljiang/Documents/Dataset/MOT20/train/MOT20-01/'+ 'detect'+str(bbox_confidence_threshold)+'/'+ path.split('/')[-1])
-    # # dstfile = path.split('.jpg')[0] + '_detect.jpg'
-    # print(len(box_detected))
-    # for idx,bbox in enumerate(box_detected):
-    #     cv2.rectangle(img,(int(bbox[0][0]),int(bbox[0][1])),(int(bbox[1][0]),int(bbox[1][1])),(0,255,0),2)
-    #     cv2.putText(img,str(round(box_confidence_scores[idx],2)),(int((int(bbox[0][0])+int(bbox[1][0]))/2),int((int(bbox[0][1])+int(bbox[1][1]))/2)),cv2.FONT_HERSHEY_SIMPLEX,1,(0,0,255),2)
-    # cv2.imwrite(dstfile,img)
-    img = cv2.imread(path)
-    if not os.path.exists(os.path.join(os.path.dirname(path)[:-4]+ 'detect'+str(bbox_confidence_threshold)+'nms'+ str(nms_thresh)+'/')):
-        os.makedirs(os.path.join(os.path.dirname(path)[:-4]+ 'detect'+str(bbox_confidence_threshold)+'nms'+ str(nms_thresh)+'/'))
-    dstfile = os.path.join(os.path.dirname(path)[:-4]+ 'detect'+str(bbox_confidence_threshold)+'nms'+ str(nms_thresh)+'/'+ path.split('/')[-1])
-    # dstfile = path.split('.jpg')[0] + '_detect.jpg'
-    print(len(box_detected))
-    det_cnt_frame_list.append(len(box_detected))
-    det_cnt += len(box_detected)
-    for idx,bbox in enumerate(box_detected):
-        cv2.rectangle(img,(int(bbox[0][0]),int(bbox[0][1])),(int(bbox[1][0]),int(bbox[1][1])),(0,255,0),2)
-        cv2.putText(img,str(round(box_confidence_scores[idx],2)),(int((int(bbox[0][0])+int(bbox[1][0]))/2),int((int(bbox[0][1])+int(bbox[1][1]))/2)),cv2.FONT_HERSHEY_SIMPLEX,1,(0,0,255),2)
-    cv2.imwrite(dstfile,img)
-        
+
     return tracklet_pose_collection
 
 # def compute_inter_person_similarity_init_pool(input_person_to_person_matching_matrix_normalized_collection):
@@ -809,7 +1101,7 @@ def information_gain(current_video_segment_representative_frames_current_trackle
     else:
         return False, None
 
-def linear_assignment(cost_matrix):
+def linear_assignment_ori(cost_matrix):
   try:
     import lap
     _, x, y = lap.lapjv(cost_matrix, extend_cost=True) # _:最优指派的代价 x:为一个长度为 N行数的数组，指定每行分配给哪一列 y:为长度为列数的数组，指定每列分配给哪一行。
@@ -819,6 +1111,19 @@ def linear_assignment(cost_matrix):
     x, y = linear_sum_assignment(cost_matrix) # x:行索引 y:列索引
     return np.array(list(zip(x, y)))
 
+def linear_assignment(cost_matrix, thresh):
+    if cost_matrix.size == 0:
+        return np.empty((0, 2), dtype=int), tuple(range(cost_matrix.shape[0])), tuple(range(cost_matrix.shape[1]))
+    matches, unmatched_a, unmatched_b = [], [], []
+    cost, x, y = lap.lapjv(cost_matrix, extend_cost=True, cost_limit=thresh) # cost_limit:代价矩阵当中每个元素上限值，超过cost_limit的元素不参与分配
+    # cost_limit 设置过小会漏掉能匹配上的目标，设置过大会增加错误的匹配
+    for ix, mx in enumerate(x):
+        if mx >= 0:
+            matches.append([ix, mx])
+    unmatched_a = np.where(x < 0)[0]
+    unmatched_b = np.where(y < 0)[0]
+    matches = np.asarray(matches)
+    return matches, unmatched_a, unmatched_b
 
 def cosine_similarity(vec1,vec2):
     num = float(np.dot(vec1, vec2.T))
@@ -826,8 +1131,39 @@ def cosine_similarity(vec1,vec2):
     cos = num / denom  # cosine similarity
     return cos
 
+def batch_track_regression(track1,frame_start,frame_end,frame_span1):
+    '''
+    track1:previous_video_segment_predicted_tracks_bboxes_test
+    start,end:regression start and end
+    frame_span:original frame span (true detections)
+    '''
+    frame_bbox1 = {int(track1[node][0].split('.')[0]): track1[node][1] for node in track1}  # key:frame(int) value:bbox
+    if set(range(frame_start,frame_end+1)) < set(frame_bbox1) : # 此时不需要进行回归,start到end内的元素均已有，此时不需要回归
+        frame_bbox1 = dict(sorted(frame_bbox1.items(), key=operator.itemgetter(0))) # in order
+        return frame_bbox1
+    width1 = np.mean([frame_bbox1[frame][1][0] - frame_bbox1[frame][0][0] for frame in frame_bbox1])
+    height1 = np.mean([frame_bbox1[frame][1][1] - frame_bbox1[frame][0][1] for frame in frame_bbox1])
+    horicenter_coordinates1 = (np.array(
+        [frame_bbox1[frame][1][0] + frame_bbox1[frame][0][0] for frame in frame_bbox1]) / 2.0).tolist()  # 水平
+    vertcenter_coordinates1 = (np.array(
+        [frame_bbox1[frame][1][1] + frame_bbox1[frame][0][1] for frame in frame_bbox1]) / 2.0).tolist()  # 垂直
+    horicenter_fitter_coefficients = np.polyfit(frame_span1, horicenter_coordinates1, 1)
+    vertcenter_fitter_coefficients = np.polyfit(frame_span1, vertcenter_coordinates1, 1)
+    horicenter_fitter = np.poly1d(horicenter_fitter_coefficients)  # np.poly1d根据数组生成一个多项式
+    vertcenter_fitter = np.poly1d(vertcenter_fitter_coefficients)
+    for frame in range(frame_start, frame_end + 1):
+        if frame in frame_bbox1:  # 已经存在
+            continue
+        else:  #
+            frame_bbox1[frame] = [
+                (horicenter_fitter(float(frame)) - width1 / 2.0, vertcenter_fitter(float(frame)) - height1 / 2.0),
+                (horicenter_fitter(float(frame)) + width1 / 2.0, vertcenter_fitter(float(frame)) + height1 / 2.0)]
+    # frame_bbox1 = dict(sorted(frame_bbox1.items(),key=lambda d:d[0]))
+    # frame_bbox1 = sorted(frame_bbox1)
+    frame_bbox1 = dict(sorted(frame_bbox1.items(), key=operator.itemgetter(0)))  # 按照key值升序,从而使得计算iou的时候帧数是对应的
+    return frame_bbox1
 
-def stitching_tracklets_revised(current_video_segment_predicted_tracks_bboxes_test,current_trajectory_similarity_dict,previous_video_segment_predicted_tracks_bboxes_test,previous_trajectory_similarity_dict,node_matching_dict):
+def stitching_tracklets_revised(kmedoids_instance,current_video_segment_predicted_tracks_bboxes_test,current_trajectory_similarity_dict,previous_video_segment_predicted_tracks_bboxes_test,previous_trajectory_similarity_dict,node_matching_dict,mapping_node_id_to_features,mapping_node_id_to_bbox):
     prev_last_frame_node_list = list(node_matching_dict.values())
     curr_first_frame_node_list = list(node_matching_dict.keys())
     result_dict = {}
@@ -861,13 +1197,74 @@ def stitching_tracklets_revised(current_video_segment_predicted_tracks_bboxes_te
 
     curr_unmatched_tracks = list(set(current_video_segment_predicted_tracks_bboxes_test.keys())-set(result_dict.keys()))
     previous_unmatched_tracks = list(set(previous_video_segment_predicted_tracks_bboxes_test.keys())-set(result_dict.values()))
+    # node_list = curr_first_frame_node_list - 
+    curr_track_first_node = [list(current_video_segment_predicted_tracks_bboxes_test[x].keys())[0] for x in curr_unmatched_tracks]
+    # mapping2node_id_bbox_part2 = {list(current_video_segment_predicted_tracks_bboxes_test[x].keys())[0]:current_video_segment_predicted_tracks_bboxes_test[x].get(list(current_video_segment_predicted_tracks_bboxes_test[x].keys())[0]) for x in current_video_segment_predicted_tracks_bboxes_test}
+
+    data = cluster_data(curr_track_first_node, mapping_node_id_to_features, mapping_node_id_to_bbox)
+    labels = kmedoids_instance.predict(data)
     # result_dict: key:当前轨迹id，value： 前一个轨迹id
     # previous_unmatched_tracks: list,记录未匹配的轨迹
     # curr_unmatched_tracks:list,记录当前batch未匹配的的轨迹，表示新出现的轨迹
     return result_dict, previous_unmatched_tracks, curr_unmatched_tracks
 
+def stitching_tracklets_revised_bidirectional(previous_bboxes_test,current_bboxes_test):
+    remove_list = []
+    dists = np.zeros((len(previous_bboxes_test), len(current_bboxes_test)))
+    ###### 对于小于2的如何计算相似度 ######
+    '''
+    1 在上一个阶段删除小于2的tracklet
+    2 小于2的tracklet采用和下一个track第1帧来计算相似度
+    '''
+    previous_tracks_id = list(previous_bboxes_test.keys())
+    current_tracks_id = list(current_bboxes_test.keys())
+    for id1 in previous_bboxes_test:
+        for id2 in current_bboxes_test:
+            track1 = previous_bboxes_test[id1]
+            frame_span1 = [int(track1[node][0].split('.')[0]) for node in track1] # 自变量
+            track2 = current_bboxes_test[id2]
+            frame_span2 = [int(track2[node][0].split('.')[0]) for node in track2]
+            if len(previous_bboxes_test[id1]) < 3 or len(current_bboxes_test[id2]) < 3:  # 小于2的时候无法进行回归
+                '''
+                无法回归的时候采用iou相似度
+                '''
+                bbox1 = track1[max(list(track1.keys()))][1]
+                bbox2 = track2[min(list(track2.keys()))][1]
+                # [former_bbox[0][1], former_bbox[1][1], former_bbox[0][0], former_bbox[1][0]]
+                dists[previous_tracks_id.index(id1), current_tracks_id.index(id2)] = 1 - compute_iou_single_box([bbox1[0][1],bbox1[1][1],bbox1[0][0],bbox1[1][0]],[bbox2[0][1],bbox2[1][1],bbox2[0][0],bbox2[1][0]]) #
+            # tmp_span = frame_span1 + frame_span2
+            # frame_start,frame_end = min(frame_span1+frame_span2),max(frame_span1+frame_span2)
+            frame_start,frame_end = max(frame_span1),min(frame_span2)
+            frame_span = list(range(frame_start, frame_end + 1)) #  两个batch的frame范围
+            frame_bbox1 = batch_track_regression(track1,frame_start,frame_end,frame_span1)
+            frame_bbox2 = batch_track_regression(track2, frame_start, frame_end,frame_span2)
+            ### regression ##
+            ### 从最小的frame到最大的frame计算相似度 ###
+            #### 注意两个轨迹段比较的帧一定要对应 ####
+            tracklet1 = np.array([frame_bbox1[frame] for frame in frame_span])
+            tracklet2 = np.array([frame_bbox2[frame] for frame in frame_span])
+            tracklet_ious_matrix  = compute_iou_between_bbox_list(tracklet1.reshape(-1, 2, 2), tracklet2.reshape(-1, 2, 2))
+            # tracklet_overlap_matrix = compute_overlap_between_bbox_list(tracklet1.reshape(-1, 2, 2), tracklet2.reshape(-1, 2, 2))
+            ious = np.diagonal(tracklet_ious_matrix)
+            # print('track{0} and track{1} iou is {2}'.format(id1,id2,np.mean(ious)))
+            dists[previous_tracks_id.index(id1), current_tracks_id.index(id2)] = 1 - np.mean(ious[frame_span.index(max(frame_span1)):frame_span.index(min(frame_span2))+1])  # 前一个轨迹最后一帧与当前轨迹最前面一帧
+    matched_indices, previous_unmatched_ids, curr_unmatched_ids = linear_assignment(dists, thresh= 0.3) # ???
+    result_dict = {}
+    previous_unmatched_tracks = []
+    curr_unmatched_tracks = []
+    for m in matched_indices:
+        # 对matched_indices进行判断
+        result_dict[current_tracks_id[m[1]]] = previous_tracks_id[m[0]]
+    # print(np.mean(mean_similarity_list))
+    for track_id in previous_unmatched_ids:
+        previous_unmatched_tracks.append(previous_tracks_id[track_id])
 
-def stitching_tracklets(node_matching_dict,tracklet_inner_cnt, current_video_segment_predicted_tracks, previous_video_segment_predicted_tracks, current_video_segment_predicted_tracks_bboxes, previous_video_segment_predicted_tracks_bboxes, current_video_segment_representative_frames, previous_video_segment_representative_frames,current_video_segment_predicted_tracks_bboxes_test):
+    for track_id in curr_unmatched_ids:
+        curr_unmatched_tracks.append(current_tracks_id[track_id])
+    return  result_dict,previous_unmatched_tracks,curr_unmatched_tracks
+
+
+def stitching_tracklets(node_matching_dict,tracklet_inner_cnt, current_video_segment_predicted_tracks, previous_video_segment_predicted_tracks, current_video_segment_predicted_tracks_bboxes, previous_video_segment_predicted_tracks_bboxes, current_video_segment_representative_frames, previous_video_segment_representative_frames,current_video_segment_predicted_tracks_bboxes_test,previous_video_segment_predicted_tracks_bboxes_test,unmatched_tracks_memory_dict):
     # split one trajectory into two if box in t-1 has iou with box in t lower than split_single_trajectory_thresh if split one into three ?
     # for current_video_segment_predicted_tracks_bboxes_key in [x for x in current_video_segment_predicted_tracks_bboxes.keys()]:
     #     for time_idx in range(len(current_video_segment_predicted_tracks_bboxes[current_video_segment_predicted_tracks_bboxes_key]) - 1):
@@ -894,6 +1291,10 @@ def stitching_tracklets(node_matching_dict,tracklet_inner_cnt, current_video_seg
     # frames_width = previous_video_segment_representative_frames[[x for x in previous_video_segment_representative_frames][0]][1][1]
     frames_height = frame_height
     frames_width = frame_width
+    # (0,boder_x_min) (boder_x_max,frames_width)
+    gap = 60  # gap设置太大会把最后一段轨迹给分开来
+    border_x_min,border_x_max =  gap ,frames_width-gap
+    border_y_min,boder_y_max = gap,frames_height-gap
     tracklets_similarity_matrix = np.zeros((len(previous_video_segment_predicted_tracks), len(current_video_segment_predicted_tracks)))
     predicted_bbox_based_on_historical_traj = {}
 
@@ -907,7 +1308,13 @@ def stitching_tracklets(node_matching_dict,tracklet_inner_cnt, current_video_seg
         whether_use_consistency_in_traj = False
     # for previous_tracklet_id in previous_video_segment_predicted_tracks_bboxes_test:
     # for current_video_segment_predicted_tracks_bboxes_test
+    ###
+
     for previous_tracklet_id in previous_video_segment_predicted_tracks_bboxes:
+        # ### 终止该条轨迹，不进行reid 匹配 ###
+        # if previous_tracklet_id in terminate_track_list:
+        #     tracklets_similarity_matrix[[x for x in previous_video_segment_predicted_tracks].index(previous_tracklet_id),:] = 1
+        #     continue
         trajectory_from_prev = previous_video_segment_predicted_tracks_bboxes[previous_tracklet_id] # 前一个batch的一条轨迹
         # if len(trajectory_from_prev) >= 3:
         #     for trajectory_from_prev_key in range(1, len([x for x in trajectory_from_prev]) - 1):
@@ -1021,10 +1428,10 @@ def stitching_tracklets(node_matching_dict,tracklet_inner_cnt, current_video_seg
                                                    max(((np.array([previous_tracklet_id_predictions[x][0] for x in previous_tracklet_id_predictions])+np.array([previous_tracklet_id_predictions[x][1] for x in previous_tracklet_id_predictions])) / 2.0).tolist()) >= frames_height or \
                                                    min(((np.array([previous_tracklet_id_predictions[x][2] for x in previous_tracklet_id_predictions])+np.array([previous_tracklet_id_predictions[x][3] for x in previous_tracklet_id_predictions])) / 2.0).tolist()) < 0 or \
                                                    max(((np.array([previous_tracklet_id_predictions[x][2] for x in previous_tracklet_id_predictions])+np.array([previous_tracklet_id_predictions[x][3] for x in previous_tracklet_id_predictions])) / 2.0).tolist()) >= frames_width)
-    rows = np.min(tracklets_similarity_matrix,1)
-    min_index = np.argmin(tracklets_similarity_matrix,1) # 每行最小值索引,index表示其行数
+    # rows = np.min(tracklets_similarity_matrix,1)
+    # min_index = np.argmin(tracklets_similarity_matrix,1) # 每行最小值索引,index表示其行数
     result_dict = {}
-    result_dict_min = {}
+
     # for i in range(np.size(tracklets_similarity_matrix,1)): # 行表示前一个batch,列表示当前batch
     #     result_dict_min[i+1] = min_index.tolist().index(i)+1 # 当前轨迹id与之前轨迹id对应关系  可能存在不对应的情况
     # 需要计算匹配的轨迹以及当前帧当中新出现的轨迹以及上一帧中没有匹配到的轨迹
@@ -1034,20 +1441,24 @@ def stitching_tracklets(node_matching_dict,tracklet_inner_cnt, current_video_seg
         matched_indices = np.stack(np.where(binary_similarity_matrix),axis=1)  # [:,0] 行索引  改为键值
         # result_dict
     else:
-        matched_indices = linear_assignment(tracklets_similarity_matrix)  #  损失矩阵
+        matched_indices = linear_assignment_ori(tracklets_similarity_matrix)  #  损失矩阵
 
     previous_tracks_id = list(previous_video_segment_predicted_tracks_bboxes.keys())
     current_tracks_id = list(current_video_segment_predicted_tracks_bboxes.keys())
     previous_unmatched_tracks = []  # 前一个batch当中未匹配的
     curr_unmatched_tracks = []  # 当前batch未匹配的tracks的key
-    for m in matched_indices:
+    mean_similarity_list = []
+    for m in matched_indices: # 40,39
         # 对matched_indices进行判断
         # 对大于0.53的进行排除
-        if tracklets_similarity_matrix[m[0],m[1]] >= 0.53:
+        # print(tracklets_similarity_matrix[m[0],m[1]])
+        mean_similarity_list.append(tracklets_similarity_matrix[m[0],m[1]])
+        if tracklets_similarity_matrix[m[0],m[1]] >= 0.7:  # 3 and 40
             previous_unmatched_tracks.append(previous_tracks_id[m[0]])
             curr_unmatched_tracks.append(current_tracks_id[m[1]])
             continue
         result_dict[current_tracks_id[m[1]]] = previous_tracks_id[m[0]]
+    # print(np.mean(mean_similarity_list))
 
     for track_id in previous_video_segment_predicted_tracks_bboxes:
         if (track_id not in np.array(previous_tracks_id)[matched_indices[:,0]]):
@@ -1057,6 +1468,49 @@ def stitching_tracklets(node_matching_dict,tracklet_inner_cnt, current_video_seg
         if (track_id not in np.array(current_tracks_id)[matched_indices[:,1]]):
             curr_unmatched_tracks.append(track_id)
 
+    # new_track_list = []
+    # terminate_track_list = []
+    # for track_id in previous_unmatched_tracks:
+    #     prev_track = previous_video_segment_predicted_tracks[track_id]
+    #     center_x,center_y = prev_track[max(list(prev_track.keys()))]
+    #     flag = center_x >= border_x_max or center_x <= border_x_min or center_y >= boder_y_max or center_y <= border_y_min
+    #     if flag:
+    #         terminate_track_list.append(track_id)
+    # print('terminate track id(global) is {0}'.format(terminate_track_list))
+    # for track_id in curr_unmatched_tracks:
+    #     curr_track = current_video_segment_predicted_tracks[track_id]
+    #     center_x,center_y = curr_track[min(list(curr_track.keys()))]
+    #     flag = center_x >= border_x_max or center_x <= border_x_min or center_y >= boder_y_max or center_y <= border_y_min
+    #     if flag:
+    #         new_track_list.append(track_id)
+    # print('new track id is {0}'.format(new_track_list))
+    # # [previous_unmatched_tracks.remove(track) for track in terminate_track_list] # 去掉未匹配的轨迹避免对其回归造成id_switch
+    # # [curr_unmatched_tracks.remove(track) for track in new_track_list]
+    # ### 第二次匹配  使用reid信息 ###
+    # ### 使用列表记录新开始的轨迹以及终止的轨迹，对于不是新开始或者终止的轨迹采用reid信息进行关联 ###
+    # second_prev_track_list = list(set(copy.deepcopy(previous_unmatched_tracks)) - set(terminate_track_list))
+    # second_curr_track_list = list(set(copy.deepcopy(curr_unmatched_tracks)) - set(new_track_list))
+    # reid_similarity = np.zeros((len(second_prev_track_list),len(second_curr_track_list)))
+    # for previous_id in second_prev_track_list:
+    #      ### 超过10帧之后开始使用reid信息进行匹配 ###
+    #     prev_track = previous_video_segment_predicted_tracks_bboxes_test[previous_id]
+    #     nodes = list(prev_track.keys())
+    #     prev_track_representative_conf = prev_track[nodes[np.argmax([prev_track[node][2] for node in prev_track])]][2]
+    #     if prev_track_representative_conf < 0.8: # 如果置信度不够高说明提取出来的不够准确
+    #         reid_similarity[second_prev_track_list.index(previous_id), :] = 1
+    #         continue
+    #     else:
+    #         prev_track_representative_feature = prev_track[nodes[np.argmax([prev_track[node][2] for node in prev_track])]][3] # 该帧特征
+    #     for current_id in second_curr_track_list:
+    #         curr_track = current_video_segment_predicted_tracks_bboxes_test[current_id]
+    #         similarity_list = [cosine_similarity(np.array(curr_track[node][3]),np.array(prev_track_representative_feature)) for node in curr_track]
+    #         reid_similarity[second_prev_track_list.index(previous_id),second_curr_track_list.index(current_id)] = 1 - np.mean(similarity_list)
+    # matched_indices, previous_unmatched_ids, curr_unmatched_ids = linear_assignment(reid_similarity, thresh=0.01)  # ???
+    # for match in matched_indices:
+    #     result_dict[second_curr_track_list[match[1]]] = second_prev_track_list[match[0]]
+    #     previous_unmatched_tracks.remove(second_prev_track_list[match[0]])
+    #     curr_unmatched_tracks.remove(second_curr_track_list[match[1]])
+    #     print('matched_reid previous track id(global) is {0},current track id(local) is {1}'.format(second_prev_track_list[match[0]],second_curr_track_list[match[1]]))
 
     return  result_dict,previous_unmatched_tracks,curr_unmatched_tracks
 
@@ -1291,10 +1745,13 @@ def check_cfg(cfg):
 # split_each_track is a dict of lists, each list has nodes each of which is a list of two characters
 # output: a string
 def convert_dict_to_str(result, split_each_track):
+    if 0 in split_each_track: # 删除0组成的轨迹
+        split_each_track.pop(0)
     result_string = ''
     result_string += str(len(split_each_track)) # str(result[0].split('Predicted tracks')[1].split('\n')[1].split('~~')[0])
     result_string += '~~'
     # traverse trajectories, x denotes the key of a trajectory, y denotes the list describing the trajectory
+    split_each_track = dict(sorted(split_each_track.items(), key=lambda d: d[0]))  # 按照key排序
     for x in split_each_track:
         # all tracks start with a common node
         result_string += result[0].split('Predicted tracks')[1].split('\n')[1].split('~~')[1].split('~')[0] + '~'
@@ -1966,24 +2423,28 @@ def merge_curr_tracklet_json_with_curr_tracklet_json_conf_bbox(curr_tracklet_jso
     return curr_tracklet_json
 
 def interpolation_fix_missed_detections(previous_video_segment_predicted_tracks, previous_video_segment_predicted_tracks_bboxes, previous_video_segment_all_traj_all_object_features, tracklet_pose_collection):
+    '''
+    对tracklet_pose_collection不进行修改
+    '''
     donot_interpolate_dict = {}
-    num_bits = len([y for y in previous_video_segment_predicted_tracks_bboxes[[x for x in previous_video_segment_predicted_tracks_bboxes][0]]][0].split('.')[0])
+    num_bits = len([y for y in previous_video_segment_predicted_tracks_bboxes[[x for x in previous_video_segment_predicted_tracks_bboxes][0]]][0].split('.')[0]) # frame_bite,eg:000001.jpg以‘.’分隔开之后num_bits = 6
+    # 对previous_video_segment_predicted_tracks_bboxes进行插值
     for previous_video_segment_predicted_tracks_bboxes_key in previous_video_segment_predicted_tracks_bboxes:
-        time_key_list = [x for x in previous_video_segment_predicted_tracks_bboxes[previous_video_segment_predicted_tracks_bboxes_key]]
-        time_value_list = []
+        time_key_list = [x for x in previous_video_segment_predicted_tracks_bboxes[previous_video_segment_predicted_tracks_bboxes_key]] # frame_list
+        time_value_list = [] # convert the time_key_list into float list
         horicenter_list = []
         vertcenter_list = []
         if ('.jpg' in str(time_key_list[0])) or ('.jpg' in str(time_key_list[0])):
             time_value_list = [float(x[:-4]) for x in time_key_list]
         else:
             time_value_list = time_key_list
-        horicenter_list = [(previous_video_segment_predicted_tracks_bboxes[previous_video_segment_predicted_tracks_bboxes_key][x][0][0] + previous_video_segment_predicted_tracks_bboxes[previous_video_segment_predicted_tracks_bboxes_key][x][1][0]) / 2.0 for x in time_key_list]
-        vertcenter_list = [(previous_video_segment_predicted_tracks_bboxes[previous_video_segment_predicted_tracks_bboxes_key][x][0][1] + previous_video_segment_predicted_tracks_bboxes[previous_video_segment_predicted_tracks_bboxes_key][x][1][1]) / 2.0 for x in time_key_list]
+        horicenter_list = [(previous_video_segment_predicted_tracks_bboxes[previous_video_segment_predicted_tracks_bboxes_key][x][0][0] + previous_video_segment_predicted_tracks_bboxes[previous_video_segment_predicted_tracks_bboxes_key][x][1][0]) / 2.0 for x in time_key_list] # x center
+        vertcenter_list = [(previous_video_segment_predicted_tracks_bboxes[previous_video_segment_predicted_tracks_bboxes_key][x][0][1] + previous_video_segment_predicted_tracks_bboxes[previous_video_segment_predicted_tracks_bboxes_key][x][1][1]) / 2.0 for x in time_key_list] # y center
         width_list = [abs(previous_video_segment_predicted_tracks_bboxes[previous_video_segment_predicted_tracks_bboxes_key][x][1][0] - previous_video_segment_predicted_tracks_bboxes[previous_video_segment_predicted_tracks_bboxes_key][x][0][0]) for x in time_key_list]
         height_list = [abs(previous_video_segment_predicted_tracks_bboxes[previous_video_segment_predicted_tracks_bboxes_key][x][1][1] - previous_video_segment_predicted_tracks_bboxes[previous_video_segment_predicted_tracks_bboxes_key][x][0][1]) for x in time_key_list]
-        if max(time_value_list) - min(time_value_list) + 1 > len(time_value_list):
+        if max(time_value_list) - min(time_value_list) + 1 > len(time_value_list): # need to interpolate
             for time_value_idx in range(len(sorted(time_value_list))): #
-                if (time_value_idx > 0) and (abs(sorted(time_value_list)[time_value_idx] - sorted(time_value_list)[time_value_idx - 1]) > 1):
+                if (time_value_idx > 0) and (abs(sorted(time_value_list)[time_value_idx] - sorted(time_value_list)[time_value_idx - 1]) > 1): # 前后时间差 > 1
                     for interpolated_time_value in (sorted(time_value_list)[time_value_idx - 1] + 1, sorted(time_value_list)[time_value_idx]):
                         interpolated_horicenter = (horicenter_list[time_value_idx] - horicenter_list[time_value_idx - 1]) / abs(sorted(time_value_list)[time_value_idx] - sorted(time_value_list)[time_value_idx - 1]) * abs(interpolated_time_value - sorted(time_value_list)[time_value_idx - 1]) + horicenter_list[time_value_idx - 1]
                         interpolated_vertcenter = (vertcenter_list[time_value_idx] - vertcenter_list[time_value_idx - 1]) / abs(sorted(time_value_list)[time_value_idx] - sorted(time_value_list)[time_value_idx - 1]) * abs(interpolated_time_value - sorted(time_value_list)[time_value_idx - 1]) + vertcenter_list[time_value_idx - 1]
@@ -1994,17 +2455,18 @@ def interpolation_fix_missed_detections(previous_video_segment_predicted_tracks,
                             [(int(round(interpolated_horicenter - interpolated_width / 2)), int(round(interpolated_vertcenter - interpolated_height / 2))), (int(round(interpolated_horicenter + interpolated_width / 2)), int(round(interpolated_vertcenter + interpolated_height / 2)))] not in tracklet_pose_collection[[tracklet_pose_collection.index(x) for x in tracklet_pose_collection if int(x['img_dir'].split('/')[-1][:-4]) == interpolated_time_value][0]]['bbox_list']:
                             if '.jpg' in str(time_key_list[0]):
                                 previous_video_segment_predicted_tracks_bboxes[previous_video_segment_predicted_tracks_bboxes_key][('%0' + str(num_bits) + 'd') % interpolated_time_value + '.jpg'] = [(interpolated_horicenter - interpolated_width / 2, interpolated_vertcenter - interpolated_height / 2), (interpolated_horicenter + interpolated_width / 2, interpolated_vertcenter + interpolated_height / 2)]
+                                # %06d:整数输出，整数宽度不足6位的时候左边补数字0
                             else:
                                 previous_video_segment_predicted_tracks_bboxes[previous_video_segment_predicted_tracks_bboxes_key][interpolated_time_value] = [(interpolated_horicenter - interpolated_width / 2, interpolated_vertcenter - interpolated_height / 2), (interpolated_horicenter + interpolated_width / 2, interpolated_vertcenter + interpolated_height / 2)]
-                            tracklet_pose_collection[[tracklet_pose_collection.index(x) for x in tracklet_pose_collection if int(x['img_dir'].split('/')[-1][:-4]) == interpolated_time_value][0]]['bbox_list'].append([(interpolated_horicenter - interpolated_width / 2, interpolated_vertcenter - interpolated_height / 2), (interpolated_horicenter + interpolated_width / 2, interpolated_vertcenter + interpolated_height / 2)])
-                            tracklet_pose_collection[[tracklet_pose_collection.index(x) for x in tracklet_pose_collection if int(x['img_dir'].split('/')[-1][:-4]) == interpolated_time_value][0]]['box_confidence_scores'].append(1.1)
+                            # tracklet_pose_collection[[tracklet_pose_collection.index(x) for x in tracklet_pose_collection if int(x['img_dir'].split('/')[-1][:-4]) == interpolated_time_value][0]]['bbox_list'].append([(interpolated_horicenter - interpolated_width / 2, interpolated_vertcenter - interpolated_height / 2), (interpolated_horicenter + interpolated_width / 2, interpolated_vertcenter + interpolated_height / 2)])
+                            # tracklet_pose_collection[[tracklet_pose_collection.index(x) for x in tracklet_pose_collection if int(x['img_dir'].split('/')[-1][:-4]) == interpolated_time_value][0]]['box_confidence_scores'].append(1.1)
                         else:
                             donot_interpolate_dict[previous_video_segment_predicted_tracks_bboxes_key] = interpolated_time_value
             proxy_dict = {}
             for proxy_dict_key in sorted([x for x in previous_video_segment_predicted_tracks_bboxes[previous_video_segment_predicted_tracks_bboxes_key]]):
                 proxy_dict[proxy_dict_key] = previous_video_segment_predicted_tracks_bboxes[previous_video_segment_predicted_tracks_bboxes_key][proxy_dict_key]
             previous_video_segment_predicted_tracks_bboxes[previous_video_segment_predicted_tracks_bboxes_key] = proxy_dict
-
+    # 对previous_video_segment_predicted_tracks插值
     for previous_video_segment_predicted_tracks_key in previous_video_segment_predicted_tracks:
         time_key_list = [x for x in previous_video_segment_predicted_tracks[previous_video_segment_predicted_tracks_key]]
         time_value_list = []
@@ -2033,7 +2495,7 @@ def interpolation_fix_missed_detections(previous_video_segment_predicted_tracks,
             for proxy_dict_key in sorted([x for x in previous_video_segment_predicted_tracks[previous_video_segment_predicted_tracks_key]]):
                 proxy_dict[proxy_dict_key] = previous_video_segment_predicted_tracks[previous_video_segment_predicted_tracks_key][proxy_dict_key]
             previous_video_segment_predicted_tracks[previous_video_segment_predicted_tracks_key] = proxy_dict
-
+    # 对previous_video_segment_predicted_tracks插值
     for previous_video_segment_all_traj_all_object_features_key in previous_video_segment_all_traj_all_object_features:
         time_key_list = [x for x in previous_video_segment_all_traj_all_object_features[previous_video_segment_all_traj_all_object_features_key]]
         time_value_list = []
@@ -2089,14 +2551,20 @@ def x1y1wh2x1y1x2y2(bbox):
     return x1y1x2y2
 
 def convert_track_to_stitch_format(split_each_track,mapping_node_id_to_bbox,mapping_node_id_to_features):
+    '''
+    evaluate the tracklet importance and interpolate missed detections,delete duplicate ones
+    '''
+    unique_frame_list = sorted(np.unique([mapping_node_id_to_bbox[x][2] for x in mapping_node_id_to_bbox]))
     curr_predicted_tracks = {}
     curr_predicted_tracks_bboxes = {}
     curr_predicted_tracks_bboxes_test = {} # 测试使用
     curr_predicted_tracks_confidence_score = {}
     curr_representative_frames = {}
+    curr_video_segment_all_traj_all_object_features = {}
     mapping_frameid_to_human_centers = {}  # 暂存curr_predicted_tracks的value
     mapping_frameid_to_bbox = {}
     mapping_frameid_to_confidence_score = {}
+    mapping_frameid_to_object_features = {}
     trajectory_similarity_dict = {}
     for track_id in split_each_track:
         trajectory_similarity_list = []
@@ -2124,6 +2592,7 @@ def convert_track_to_stitch_format(split_each_track,mapping_node_id_to_bbox,mapp
             mapping_frameid_to_bbox[frame_id] = bbox
             # mapping_frameid_to_bbox[frame_id] = [bbox,confidence_score]
             mapping_frameid_to_confidence_score[frame_id] = confidence_score
+            mapping_frameid_to_object_features[frame_id] = mapping_node_id_to_features[node_id]
             mapping_track_time_to_bbox[int(node_id)] = [frame_id,bbox,confidence_score,mapping_node_id_to_features[int(node_id)]]
             if node_id_pre != 0:
                 trajectory_similarity_list.append(cosine_similarity(np.array(mapping_node_id_to_features[node_id_pre]),np.array(mapping_node_id_to_features[int(node_id)])))
@@ -2134,6 +2603,7 @@ def convert_track_to_stitch_format(split_each_track,mapping_node_id_to_bbox,mapp
         curr_predicted_tracks_bboxes[track_id] = copy.deepcopy(mapping_frameid_to_bbox)
         curr_predicted_tracks_bboxes_test[track_id] = copy.deepcopy(mapping_track_time_to_bbox)
         curr_predicted_tracks_confidence_score[track_id] = copy.deepcopy(mapping_frameid_to_confidence_score)
+        curr_video_segment_all_traj_all_object_features[track_id] = copy.deepcopy(mapping_frameid_to_object_features)
         trajectory_similarity_dict[track_id] = trajectory_similarity_list
         # 可能刚好在第一个
         if node_id_max == 0:
@@ -2142,10 +2612,11 @@ def convert_track_to_stitch_format(split_each_track,mapping_node_id_to_bbox,mapp
         mapping_frameid_to_human_centers.clear()
         mapping_frameid_to_bbox.clear()
         mapping_frameid_to_confidence_score.clear()
-    return curr_predicted_tracks,curr_predicted_tracks_confidence_score,curr_predicted_tracks_bboxes,curr_representative_frames,curr_predicted_tracks_bboxes_test,trajectory_similarity_dict
+        mapping_frameid_to_object_features.clear()
+    return curr_predicted_tracks,curr_predicted_tracks_confidence_score,curr_predicted_tracks_bboxes,curr_representative_frames,curr_predicted_tracks_bboxes_test,trajectory_similarity_dict,curr_video_segment_all_traj_all_object_features
 
 
-def detect(opt, need_face_recognition_switch = 0, face_verification_thresh = 0.0, save_img=False):
+def detect(opt,exp, need_face_recognition_switch = 0, face_verification_thresh = 0.0, save_img=False):
     out, track_out, source, weights, view_img, save_txt, imgsz, ab_detect_hyp = \
         opt['output'], opt['track_out'], opt['source'], opt['weights'], opt['view_img'], opt['save_txt'], opt['img_size'], opt['ab_detect_hyp']
     webcam = source.isnumeric() or source.startswith('rtsp') or source.startswith('http') or source.endswith('.txt')
@@ -2194,7 +2665,69 @@ def detect(opt, need_face_recognition_switch = 0, face_verification_thresh = 0.0
     global frame_width
     global frame_height
     global tracklet_len
-    # objgraph.show_growth()
+
+
+    if not args.experiment_name:
+        args.experiment_name = exp.exp_name # 'yolox_s_mix_det'
+
+    output_dir = osp.join(exp.output_dir, args.experiment_name)#exp.output_dir='./YOLOX_outputs
+    os.makedirs(output_dir, exist_ok=True)
+
+    if args.save_result:
+        vis_folder = osp.join(output_dir, "track_vis")
+        os.makedirs(vis_folder, exist_ok=True)
+
+    if args.trt:
+        args.device = "gpu"
+    args.device = torch.device("cuda" if args.device == "gpu" else "cpu")
+
+    logger.info("Args: {}".format(args))
+
+    if args.conf is not None:
+        exp.test_conf = args.conf
+    if args.nms is not None:
+        exp.nmsthre = args.nms
+    if args.tsize is not None:
+        exp.test_size = (args.tsize, args.tsize)
+
+    model = exp.get_model().to(args.device)
+    logger.info("Model Summary: {}".format(get_model_info(model, exp.test_size)))
+    model.eval()
+
+    if not args.trt:
+        if args.ckpt is None:
+            ckpt_file = osp.join(output_dir, "best_ckpt.pth.tar")
+        else:
+            ckpt_file = args.ckpt
+        logger.info("loading checkpoint")
+        ckpt = torch.load(ckpt_file, map_location="cpu")
+        # load the model state dict
+        model.load_state_dict(ckpt["model"])
+        logger.info("loaded checkpoint done.")
+
+    if args.fuse:
+        logger.info("\tFusing model...")
+        model = fuse_model(model)
+
+    if args.fp16:
+        model = model.half()  # to FP16
+
+    if args.trt:
+        assert not args.fuse, "TensorRT model is not support model fusing!"
+        trt_file = osp.join(output_dir, "model_trt.pth")
+        assert osp.exists(
+            trt_file
+        ), "TensorRT model is not found!\n Run python3 tools/trt.py first!"
+        model.head.decode_in_inference = False
+        decoder = model.head.decode_outputs
+        logger.info("Using TensorRT to inference")
+    else:
+        trt_file = None
+        decoder = None
+
+
+    predictor = Predictor(model, exp, trt_file, decoder, args.device, args.fp16)
+    current_time = time.localtime()
 
     # Initialize
     set_logging()
@@ -2206,7 +2739,6 @@ def detect(opt, need_face_recognition_switch = 0, face_verification_thresh = 0.0
 
     # Load model
     model = attempt_load(weights, map_location=device)  # load FP32 model
-
     imgsz = check_img_size(imgsz, s=model.stride.max())  # check img_size
     if half:
         model.half()  # to FP16
@@ -2262,8 +2794,12 @@ def detect(opt, need_face_recognition_switch = 0, face_verification_thresh = 0.0
     anomaly_detection_median_filter = {}
     most_updated_json_idx = 0
 
-    # dataset.files = dataset.files[12:]
-    # dataset.video_flag = dataset.video_flag[12:]
+
+    # start_file = 260
+    # dataset.files = dataset.files[start_file:]
+    # dataset.video_flag = dataset.video_flag[start_file:]
+    # dataset.nf -= start_file
+
     # det = open('/home/allenyljiang/Documents/Dataset/MOT20/train/MOT20-01/det_tracklet.txt',encoding='utf-8')
     batch_id = 0 # window_id
     base_track_id = 0 # 写数据时的轨迹编号
@@ -2278,7 +2814,8 @@ def detect(opt, need_face_recognition_switch = 0, face_verification_thresh = 0.0
     batch_cnt = math.ceil((total_frames-1)/batch_stride)# 一共47+1个batch，429张图片, the last batch:5 frames
     unmatched_tracks_memory_dict = {} # 记忆轨迹unmatched的次数，超过一定次数之后舍弃轨迹
     for path, img, im0s, vid_cap in dataset: # check whether in reasonable order
-        frame_width,frame_height = im0s.shape[1],im0s.shape[0]
+
+        frame_width, frame_height = im0s.shape[1], im0s.shape[0]
         pose_preds = np.empty(shape=[0, 0])
         pose_confidences = np.empty(shape=[0, 0])
         img = torch.from_numpy(img).to(device)
@@ -2292,7 +2829,8 @@ def detect(opt, need_face_recognition_switch = 0, face_verification_thresh = 0.0
         pred = model(img, augment=opt['augment'])[0]
 
         # Apply NMS
-        pred = non_max_suppression(pred, opt['conf_thres'], opt['iou_thres'], classes=opt['classes'], agnostic=opt['agnostic_nms'])
+        pred = non_max_suppression(pred, opt['conf_thres'], opt['iou_thres'], classes=opt['classes'],
+                                   agnostic=opt['agnostic_nms'])
         t2 = time_synchronized()
 
         # Apply Classifier
@@ -2357,20 +2895,595 @@ def detect(opt, need_face_recognition_switch = 0, face_verification_thresh = 0.0
                 tracklet_inner_cnt = len(tracklet_pose_collection)
                 continue
         # if the bboxes in latest 10 frames are below 50% of image and the numbers of bboxes in latest 10 frames are the same
-
         # global whether_conduct_tracking
 
+        ######################################################## conduct tracking ######################################################################
 
-        # print('after a batch')
-        # objgraph.most_common_types(limit=50)
-        # objgraph.show_growth()
-        # print(str(time.time()))
+        if ((tracklet_inner_cnt + 1) >= tracklet_len + batch_id*batch_stride or batch_id == batch_cnt-1) and ({} not in tracklet_pose_collection): # and (whether_conduct_tracking == 1):
+            # (batch_id+1)*
+            batch_id += 1
+            print('batch', batch_id)
+            time_start = time.time()
+            # allen added to filter out frames without people or without head,进入到下一帧
+            if min([len(x['bbox_list']) for x in tracklet_pose_collection]) == 0: # or min([len(x['head_bbox_list']) for x in tracklet_pose_collection[-tracklet_len:]]) == 0:
+                tracklet_inner_cnt += 1
+                continue
+            # if skipped intermediate frames without people
+            # if len(tracklet_pose_collection) >= tracklet_len and abs(int(tracklet_pose_collection[-1]['img_dir'].split('/')[-1][:-4]) - int(tracklet_pose_collection[-tracklet_len]['img_dir'].split('/')[-1][:-4])) > tracklet_len - 1:
+            #     tracklet_inner_cnt += 1
+            #     continue
+            ################################################ collect the vectors of bboxes #############################################################
+            reid_start_time = time.time()
+            # input:
+            # tracklet_pose_collection: collection of details in all frames, tracklet_pose_collection is a list, each element of tracklet_pose_collection is a dict:
+            # an example of an element of tracklet_pose_collection:
+            # {'bbox_list': list of human body bounding boxes, each bbox [(left, top), (right, bottom)], float,
+            # 'head_bbox_list': list of head bounding boxes, each bbox [(left, top), (right, bottom)], float,
+            # 'box_confidence_scores': list of human body bounding boxes confidence scores, each one is a floating point number,
+            # 'target_body_box_coord': the bounding box of target, each bbox [(left, top), (right, bottom)], float,
+            # 'img_dir': the directory of current frame, str }
+            # curr_tracklet_input_people: number of people in current batch x 3 x 256 x 128
+            # output:
+            # curr_tracklet_input_people: shape number of people in current batch of frames x 3 x 256 x 128
+            # mapping_frameid_bbox_to_features: dict or lut(look up table can be implemented with C++) maps a string (frameid+'[(left, top), (right, bottom)]') to the idx of the bbox in current batch of frames, idx is integer
+            # shape: number of people in current batch of frames x 2, 2 denotes horizontal and vertical coordinates of the center of each person, float
+            curr_tracklet_input_people, mapping_frameid_bbox_to_features, curr_tracklet_input_people_center_coords = convert_list_dict_to_np(tracklet_pose_collection, 256, 128)# 近10帧
+            # curr_tracklet_input_people (79,3,256,128)
+            # mapping_frameid_bbox_to_features: dict:79
+            # curr_tracklet_input_people_center_coords:(79,2),对应节点的中心坐标
+            reid_middle_time = time.time()
+            #print('reid second half time: ' + str(reid_middle_time - reid_start_time))
+            location_weight = 0
+            # the conversion can be removed
+            # output features with shape: number of people in current batch x 512
+            # you don't need to implement this function for extracting features
+
+            # if tracklet_inner_cnt + 1 > tracklet_len:
+            #     curr_tracklet_input_people_tmp = copy.deepcopy(curr_tracklet_input_people)
+            #     curr_tracklet_input_people = curr_tracklet_input_people[[[y for y in mapping_frameid_bbox_to_features].index(x) for x in mapping_frameid_bbox_to_features if (x not in mapping_frameid_bbox_to_features_last)], :, :, :]
+            gc.collect()
+            torch.cuda.empty_cache()
+            # print(torch.cuda.memory_summary(device=0, abbreviated=False))
+
+            half_person_num = len(curr_tracklet_input_people)
+            # curr_tracklet_input_people_part1 = curr_tracklet_input_people[:round(half_person_num/2),:,:,:]
+            # curr_tracklet_input_people_part2 = curr_tracklet_input_people[round(half_person_num/2):,:,:,:]
+            # features_first_half = similarity_module(torch.from_numpy(curr_tracklet_input_people[:round(half_person_num/2),:,:,:].astype('float32')).cuda()).data.cpu()
+            # features_last_half = similarity_module(torch.from_numpy(curr_tracklet_input_people[round(half_person_num/2):,:,:,:].astype('float32')).cuda()).data.cpu()
+            # features =
+            with torch.no_grad():
+                features = similarity_module(torch.from_numpy(curr_tracklet_input_people.astype('float32')).cuda()).data.cpu()
+            # 计算所有input people的特征向量
+            # Tensor(79,512)
+
+            # if tracklet_inner_cnt + 1 > tracklet_len:
+            #     curr_tracklet_input_people = curr_tracklet_input_people_tmp
+            #     features = torch.cat([features_last, features], dim=0) # np.concatenate((features_last, features), axis = 0)
+            #     features = features[-len(mapping_frameid_bbox_to_features):, :]
+
+            reid_end_time = time.time()
+            # mapping_frameid_bbox_to_features 的值替换为bbox的特征
+            for mapping_frameid_bbox_to_features_key in mapping_frameid_bbox_to_features.keys():
+                mapping_frameid_bbox_to_features[mapping_frameid_bbox_to_features_key] = features.data.numpy()[mapping_frameid_bbox_to_features[mapping_frameid_bbox_to_features_key], :].tolist()
+
+            # curr_tracklet_input_people_last, mapping_frameid_bbox_to_features_last, curr_tracklet_input_people_center_coords_last, features_last = \
+            #     copy.deepcopy(curr_tracklet_input_people), copy.deepcopy(mapping_frameid_bbox_to_features), copy.deepcopy(curr_tracklet_input_people_center_coords), copy.deepcopy(features)
+
+            if dump_switch == 1:
+                if not os.path.exists(os.path.join(dump_curr_video_name)):
+                    os.mkdir(os.path.join(dump_curr_video_name))
+                    # np.save(os.path.join(dump_curr_video_name, 'features: frame' + str(tracklet_inner_cnt + 1 - tracklet_len) + 'to' + str(tracklet_inner_cnt) + '.npy'), features)
+                out_file = os.path.join(dump_curr_video_name, 'tracklet_pose_collection_frame' + str(tracklet_inner_cnt + 1 - tracklet_len) + 'to' + str(tracklet_inner_cnt) + '.json')
+                json.dump(tracklet_pose_collection[tracklet_inner_cnt + 1 - tracklet_len: tracklet_inner_cnt + 1], codecs.open(out_file, 'w', encoding='utf-8'), separators=(',', ':'), sort_keys=True)
+                out_file = os.path.join(dump_curr_video_name, 'features_frame' + str(tracklet_inner_cnt + 1 - tracklet_len) + 'to' + str(tracklet_inner_cnt) + '.json')
+                json.dump(features.tolist(), codecs.open(out_file, 'w', encoding='utf-8'), separators=(',', ':'), sort_keys=True)
+                out_file = os.path.join(dump_curr_video_name, 'mapping_frameid_bbox_to_features_frame' + str(tracklet_inner_cnt + 1 - tracklet_len) + 'to' + str(tracklet_inner_cnt) + '.json')
+                json.dump(mapping_frameid_bbox_to_features, codecs.open(out_file, 'w', encoding='utf-8'), separators=(',', ':'), sort_keys=True)
+
+
+            #print('reid second half time: ' + str(reid_end_time - reid_middle_time))
+            ############################################################################################################################################
+            mapping_node_id_to_bbox = {} # dict:79 包含每个node的bbox位置置信度以及帧名
+            mapping_node_id_to_features = {} #　dict: key=str(imgname,bbox) value=feature
+            mapping_edge_id_to_cost = {} #　每个id与下一帧每个id的损失　
+            mapping_node_id_to_keypoint = {}
+            node_id_cnt = 1 #
+            # time_start = time.time()
+
+            ###################################################################### multiprocessing for computing matching error between people
+            # error_computing_start_time = time.time()
+            # number of frame-to-frame pairs for matching
+            num_of_person_to_person_matching_matrix_normalized_copies = 0
+            # for multi-process, the matching between each pair of frames produces a matrix with number of rows equal to the number of people in the former frame and
+            # number of cols equal to the number of people in the latter frame, this variable stores the maximum number of rows throughout all frame pairs
+            max_row_num_of_person_to_person_matching_matrix_normalized = 0 #所有当前帧中最大值
+            # for multi-process, the matching between each pair of frames produces a matrix with number of rows equal to the number of people in the former frame and
+            # number of cols equal to the number of people in the latter frame, this variable stores the maximum number of cols throughout all frame pairs
+            max_col_num_of_person_to_person_matching_matrix_normalized = 0 #所有下一帧中最大值
+            tracklet_inner_idx_list = []
+            node_id_cnt_list = []
+            parallel_tasks_args_list = []
+            for tracklet_inner_idx in range(0, tracklet_len):
+                curr_frame_dict = tracklet_pose_collection[tracklet_inner_idx]  # 当前处理帧
+                for idx_stride_between_frame_pair in range(1, 3): # 配对帧之间步长最多为2
+                    if tracklet_inner_idx + idx_stride_between_frame_pair >= len(tracklet_pose_collection): # 保证仍然在该batch内
+                        continue
+                    ##### here input tracklet_pose_collection may consume to much memory
+                    # each element of parallel_tasks_args_list corresponds to one frame pair, one element consists of: frame idx of the former frame, starting frame idx of current batch of frames,
+                    # current node idx (each node represents one person in a certain frame), collection of all human bounding boxes in current batch, stride between former and latter frames, an extremely large number
+                    parallel_tasks_args_list.append([tracklet_inner_idx, tracklet_inner_cnt - tracklet_len + 1, node_id_cnt, tracklet_pose_collection, idx_stride_between_frame_pair, maximum_possible_number]) # 当前batch起始帧位置
+                    next_frame_dict = tracklet_pose_collection[tracklet_inner_idx + idx_stride_between_frame_pair]
+                    num_of_person_to_person_matching_matrix_normalized_copies += 1
+                    max_row_num_of_person_to_person_matching_matrix_normalized = max([max_row_num_of_person_to_person_matching_matrix_normalized, len(curr_frame_dict['bbox_list'])])
+                    max_col_num_of_person_to_person_matching_matrix_normalized = max([max_col_num_of_person_to_person_matching_matrix_normalized, len(next_frame_dict['bbox_list'])])
+                node_id_cnt += len(curr_frame_dict['bbox_list'])
+
+            # The matching matrix storing the matching relations between all pairs of frames
+            person_to_person_matching_matrix_normalized_collection = np.zeros((max_row_num_of_person_to_person_matching_matrix_normalized, max_col_num_of_person_to_person_matching_matrix_normalized, num_of_person_to_person_matching_matrix_normalized_copies))
+            result_person_to_person_matching_matrix_normalized_collection = copy.deepcopy(person_to_person_matching_matrix_normalized_collection)
+            # person_to_person_matching_matrix_normalized_collection = multiprocessing.RawArray('d', person_to_person_matching_matrix_normalized_collection.ravel())
+            for parallel_tasks_args_list_item in parallel_tasks_args_list:
+                tracklet_inner_idx_list.append(parallel_tasks_args_list_item[0])
+                node_id_cnt_list.append(parallel_tasks_args_list_item[2])
+                parallel_tasks_args_list[parallel_tasks_args_list.index(parallel_tasks_args_list_item)] = parallel_tasks_args_list_item + [max_row_num_of_person_to_person_matching_matrix_normalized, max_col_num_of_person_to_person_matching_matrix_normalized, num_of_person_to_person_matching_matrix_normalized_copies, node_id_cnt_list, features]
+            # with multiprocessing.Pool(processes=8) as pool:
+            whether_use_iou_similarity_or_not = True # (GetFaceSmdScore(im0s) > 0.7) # 如果清晰度大于阈值则使用iou_similarity
+
+            for parallel_tasks_args_list_item in parallel_tasks_args_list:
+                person_to_person_matching_matrix_normalized, idx_stride_between_frame_pair, node_id_cnt = compute_inter_person_similarity_worker(parallel_tasks_args_list_item, whether_use_iou_similarity_or_not)
+                # collect the results from multiprocessing and store the matching error between each pair of frames into result_person_to_person_matching_matrix_normalized_collection
+                result_person_to_person_matching_matrix_normalized_collection[0:person_to_person_matching_matrix_normalized.shape[0], \
+                                                                              0:person_to_person_matching_matrix_normalized.shape[1], \
+                                                                              [parallel_tasks_args_list.index(x) for x in parallel_tasks_args_list if (x[2]==node_id_cnt and x[4]==idx_stride_between_frame_pair)][0]] = person_to_person_matching_matrix_normalized
+            if dump_further_switch == 1:
+                if not os.path.exists(os.path.join(dump_curr_video_name)):
+                    os.mkdir(os.path.join(dump_curr_video_name))
+                # '/usr/local/SSP_EM/tracking_for_integration/node_id_cnt_list_frame0to9.json'
+                out_file = os.path.join(dump_curr_video_name, 'node_id_cnt_list_frame' + str(tracklet_inner_cnt + 1 - tracklet_len) + 'to' + str(tracklet_inner_cnt) + '.json')
+                json.dump(node_id_cnt_list, codecs.open(out_file, 'w', encoding='utf-8'), separators=(',', ':'), sort_keys=True)
+                parallel_tasks_args_list_for_dump = copy.deepcopy(parallel_tasks_args_list)
+                for parallel_tasks_args_list_for_dump_idx in range(len(parallel_tasks_args_list_for_dump)):
+                    parallel_tasks_args_list_for_dump[parallel_tasks_args_list_for_dump_idx][-1] = parallel_tasks_args_list_for_dump[parallel_tasks_args_list_for_dump_idx][-1].data.numpy().tolist() # Tensor转化
+                out_file = os.path.join(dump_curr_video_name, 'parallel_tasks_args_list_frame' + str(tracklet_inner_cnt + 1 - tracklet_len) + 'to' + str(tracklet_inner_cnt) + '.json')
+                json.dump(parallel_tasks_args_list_for_dump, codecs.open(out_file, 'w', encoding='utf-8'), separators=(',', ':'), sort_keys=True)
+            # if dump_switch == 1:
+            #     out_file = os.path.join(dump_curr_video_name, 'result_person_to_person_matching_matrix_normalized_collection_frame' + str(tracklet_inner_cnt + 1 - tracklet_len) + 'to' + str(tracklet_inner_cnt) + '.json')
+            #     json.dump(result_person_to_person_matching_matrix_normalized_collection.tolist(), codecs.open(out_file, 'w', encoding='utf-8'), separators=(',', ':'), sort_keys=True)
+
+            # The tracking algorithm organizes detections in the form of nodes, each node corresponds to the index of one object in a batch of frames, this part of preprocessing computes the edges between nodes, each edge measures the matching error between its two ending nodes.
+            # node id starts from 1
+            node_id_cnt = 1
+            for tracklet_inner_idx in range(0, tracklet_len):
+                # tracklet_pose_collection is a dict, each key is an integer of frame id, the value corresponding to the key is a dict with following keys:
+                # 'bbox_list': a list of bboxes in the frame, each bbox with floating data [(left coordinate, top coordinate), (right coordinate, bottom coordinate)], body bboxes
+                # 'head_bbox_list': a list of bboxes in the frame, each bbox with floating data [(left coordinate, top coordinate), (right coordinate, bottom coordinate)], head bboxes
+                # 'box_confidence_scores': a list of confidences of bboxes, each element is a floating number within range [0, 1]
+                # 'target_body_box_coord': a list with two elements, in the format of floating [(left coordinate, top coordinate), (right coordinate, bottom coordinate)], describe the bbox of the target person
+                # 'img_dir': a string describing the location for storing the frame, ending with '.jpg'
+                curr_frame_dict = tracklet_pose_collection[tracklet_inner_idx]
+                # matching is conducted between (frame t, frame t+1) and (frame t, frame t+2), that is (frame t, frame t+idx_stride_between_frame_pair) with idx_stride_between_frame_pair=1, 2
+                for idx_stride_between_frame_pair in range(1, 3):
+                    # if frame t and frame t+idx_stride_between_frame_pair all have detections
+                    if tracklet_inner_idx + idx_stride_between_frame_pair < len(tracklet_pose_collection):
+                        next_frame_dict = tracklet_pose_collection[tracklet_inner_idx + idx_stride_between_frame_pair]
+                        ############################################################# matching ######################################################
+                        # introduction
+                        # Now begin to obtain a matrix describing the matching error between people in two frames, each row corresponds to one person in current frame, each column corresponds to one person in next frame
+                        # each element of parallel_tasks_args_list corresponds to one frame pair, one element consists of: frame idx of the former frame, starting frame idx of current batch of frames,
+                        # starting node idx in former frame in a frame pair (each node represents one person in a certain frame), collection of all human bounding boxes in current batch, stride between former and latter frames, an extremely large number,
+                        # maximum number of people in former frames from all frame pairs, maximum number of people in latter frames from all frame pairs, number of frame pairs for matching in current batch of frames,
+                        # an integer list of starting node ids in former frame from all frame pairs, a floating array with shape num_people_in_current_batch_of_frames x 512 describing the reid features of all humans in current batch of frames
+                        # input
+                        # 0:len(curr_frame_dict['bbox_list']) - from 0 to the number of people in the former frame in frame pair
+                        # 0:len(next_frame_dict['bbox_list']) - from 0 to the number of people in the latter frame in frame pair
+                        # [parallel_tasks_args_list.index(x) for x in parallel_tasks_args_list if (x[2]==node_id_cnt and x[4]==idx_stride_between_frame_pair)][0] - the channel idx of the matrix describing matching relations between current frame pair in result_person_to_person_matching_matrix_normalized_collection
+                        # output
+                        # a floating matrix person_to_person_matching_matrix_normalized describing the matching relations between current batch of frames
+                        person_to_person_matching_matrix_normalized = result_person_to_person_matching_matrix_normalized_collection[0:len(curr_frame_dict['bbox_list']), 0:len(next_frame_dict['bbox_list']), [parallel_tasks_args_list.index(x) for x in parallel_tasks_args_list if (x[2]==node_id_cnt and x[4]==idx_stride_between_frame_pair)][0]]
+                        ########################################################## begin to prepare data for tracker ###################################################################
+                        time_start_prepare_costs = time.time()
+                        # input
+                        # idx_stride_between_frame_pair: temporal stride between current frame pair
+                        # curr_frame_dict: a dict storing 'bbox_list', 'head_bbox_list', 'box_confidence_scores', 'target_body_box_coord' and 'img_dir' of former frame in current frame pair
+                        # tracklet_pose_collection: dicts of all frames
+                        # next_frame_dict: a dict storing 'bbox_list', 'head_bbox_list', 'box_confidence_scores', 'target_body_box_coord' and 'img_dir' of latter frame in current frame pair
+                        # person_to_person_matching_matrix_normalized: output of the last function
+                        # node_id_cnt: starting node id of nodes in former frame in current frame pair
+                        # tracklet_inner_idx: frame id of the former frame
+                        # mapping_node_id_to_bbox: an empty dict
+                        # mapping_node_id_to_features: an empty dict
+                        # mapping_edge_id_to_cost: an empty dict
+                        # mapping_frameid_bbox_to_features: a dict mapping string 'frameid_bbox coordinates' to a 512-D feature vector, the string 'frameid_bbox coordinates' has length 36, an example is '0930[(467.0, 313.0), (508.0, 424.0)]' where 0930 is frame id, the coordinates are in the format [(left, top), (right, bottom)]
+                        mapping_node_id_to_bbox, mapping_node_id_to_features, mapping_edge_id_to_cost = prepare_costs_for_tracking_alg(idx_stride_between_frame_pair, curr_frame_dict, tracklet_pose_collection, next_frame_dict, person_to_person_matching_matrix_normalized, node_id_cnt, tracklet_inner_idx, mapping_node_id_to_bbox, mapping_node_id_to_features, mapping_edge_id_to_cost, mapping_frameid_bbox_to_features)
+                        time_end_prepare_costs = time.time()
+
+                node_id_cnt += len(curr_frame_dict['bbox_list'])
+
+            # mapping_frameid_bbox_to_features.clear()
+
+            # time_end = time.time()
+            # error_computing_end_time = time.time()
+            #print('error computing time: ' + str(error_computing_end_time - error_computing_start_time))
+            max_in_mapping_edge_id_to_cost = max([mapping_edge_id_to_cost[x] for x in mapping_edge_id_to_cost]) + 1e-6
+            if max_in_mapping_edge_id_to_cost >= 0:
+                for mapping_edge_id_to_cost_key in mapping_edge_id_to_cost:
+                    mapping_edge_id_to_cost[mapping_edge_id_to_cost_key] = mapping_edge_id_to_cost[mapping_edge_id_to_cost_key] - max_in_mapping_edge_id_to_cost
+            if dump_further_switch == 1:
+                if not os.path.exists(os.path.join(dump_curr_video_name)):
+                    os.mkdir(os.path.join(dump_curr_video_name))
+                out_file = os.path.join(dump_curr_video_name, 'input_to_track_mapping_node_id_to_bbox_frame' + str(tracklet_inner_cnt + 1 - tracklet_len) + 'to' + str(tracklet_inner_cnt) + '.json')
+                json.dump(mapping_node_id_to_bbox, codecs.open(out_file, 'w', encoding='utf-8'), separators=(',', ':'), sort_keys=True)
+                out_file = os.path.join(dump_curr_video_name, 'input_to_track_mapping_node_id_to_features_frame' + str(tracklet_inner_cnt + 1 - tracklet_len) + 'to' + str(tracklet_inner_cnt) + '.json')
+                json.dump(mapping_node_id_to_features, codecs.open(out_file, 'w', encoding='utf-8'), separators=(',', ':'), sort_keys=True)
+                out_file = os.path.join(dump_curr_video_name, 'input_to_track_mapping_edge_id_to_cost_frame' + str(tracklet_inner_cnt + 1 - tracklet_len) + 'to' + str(tracklet_inner_cnt) + '.json')
+                json.dump(mapping_edge_id_to_cost, codecs.open(out_file, 'w', encoding='utf-8'), separators=(',', ':'), sort_keys=True)
+            ##################################################################################################################################
+            ############################ organize graph and call #############################################################################
+            # time_start = time.time()
+            if int(mapping_node_id_to_bbox[max([x for x in mapping_node_id_to_bbox])][2][:-4]) == len(dataset.files) - 1 and len(mapping_node_id_to_bbox) == 0 and len(mapping_edge_id_to_cost) == 0:
+                break
+            # time_start = time.time()
+            result = tracking(mapping_node_id_to_bbox, mapping_edge_id_to_cost, tracklet_inner_cnt) # tracking函数为ssp算法实现
+            time_end = time.time()
+            # print('SSP computing time: ' + str(time_end - time_start))
+            split_each_track_SSP, valid_mask  = update_split_each_track_valid_mask(result)
+            # current_video_segment_predicted_tracks_SSP = {}
+            # current_video_segment_predicted_tracks_confidence_score_SSP = {}
+            current_video_segment_predicted_tracks_SSP, current_video_segment_predicted_tracks_confidence_score_SSP, current_video_segment_predicted_tracks_bboxes_SSP, current_video_segment_representative_frames_SSP,current_video_segment_predicted_tracks_bboxes_test_SSP,trajectory_similarity_dict_SSP,current_video_segment_all_traj_all_object_features_SSP= convert_track_to_stitch_format(split_each_track_SSP,mapping_node_id_to_bbox,mapping_node_id_to_features)
+            # print(str(tracklet_inner_cnt) + ' ' + result[0].split('Predicted tracks')[1])
+            # split_each_track, _ = update_split_each_track_valid_mask(result)
+            # result =
+            # _trajs(result, mapping_edge_id_to_cost, mapping_node_id_to_bbox, mapping_node_id_to_features)
+
+            unique_frame_list = sorted(np.unique([mapping_node_id_to_bbox[x][2] for x in mapping_node_id_to_bbox]))
+            ##### 修正之前纯SSP算法结果 #####
+            ##### 当前batch的txt写入  ########
+            for frame_name in unique_frame_list:
+                curr_img = cv2.imread(os.path.join(source, frame_name))
+                # curr_img = cv2.imread('/media/allenyljiang/Seagate_Backup_Plus_Drive/usr/local/VIBE-master/data/neurocomputing/05_0019/' + frame_name)
+                for human_id in split_each_track_SSP: # 当前轨迹id
+                    for node_idx in [x for x in range(len(split_each_track_SSP[human_id])) if (x % 2 == 0)]: #偶数表示人的节点 id
+                        if mapping_node_id_to_bbox[int(int(split_each_track_SSP[human_id][node_idx][1]) / 2)][2] == frame_name: #  写入帧数，轨迹数，坐标
+                            # curr_batch_txt.write(str(unique_frame_list.index(frame_name) + 1) + ',' + str(human_id) + ',' + \
+                            #                      str(mapping_node_id_to_bbox[int(int(split_each_track_SSP[human_id][node_idx][1]) / 2)][0][0][0]) + ',' + \
+                            #                      str(mapping_node_id_to_bbox[int(int(split_each_track_SSP[human_id][node_idx][1]) / 2)][0][0][1]) + ',' + \
+                            #                      str(mapping_node_id_to_bbox[int(int(split_each_track_SSP[human_id][node_idx][1]) / 2)][0][1][0]) + ',' + \
+                            #                      str(mapping_node_id_to_bbox[int(int(split_each_track_SSP[human_id][node_idx][1]) / 2)][0][1][1]) + ',-1,-1,-1,-1\n') # mot格式：必须10个数
+                            left, top = int(mapping_node_id_to_bbox[int(int(split_each_track_SSP[human_id][node_idx][1]) / 2)][0][0][0]), int(mapping_node_id_to_bbox[int(int(split_each_track_SSP[human_id][node_idx][1]) / 2)][0][0][1])
+                            cv2.putText(curr_img, str(human_id), (left, top), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 255, 0), 3)
+                if not os.path.exists(os.path.join(source.split(source.split('/')[-1])[0], 'results_all', source.split('/')[-1] + '_vis_ssp/')):
+                    #os.mkdir(os.path.join(source.split(source.split('/')[-1])[0], 'results', source.split('/')[-1] + '_vis/'))
+                    os.makedirs(os.path.join(source.split(source.split('/')[-1])[0], 'results_all', source.split('/')[-1] + '_vis_ssp/'))
+                cv2.imwrite(os.path.join(source.split(source.split('/')[-1])[0], 'results_all', source.split('/')[-1] + '_vis_ssp/') + str(tracklet_inner_cnt) + '_' + frame_name, curr_img)
+                # cv2.imwrite('/media/allenyljiang/Seagate_Backup_Plus_Drive/usr/local/VIBE-master/data/neurocomputing/results/mot20_test2/05_0019_vis/' + str(tracklet_inner_cnt) + '_' + frame_name, curr_img)
+            #curr_batch_txt.close()
+            time_start = time.time()
+            # result = BO_fix_Thompson_sampling(result, mapping_edge_id_to_cost, mapping_node_id_to_bbox, mapping_node_id_to_features, device, source,tracklet_len)# BO进行结果修复
+            result = cluster_fix(result, mapping_edge_id_to_cost, mapping_node_id_to_bbox, mapping_node_id_to_features, device, source,tracklet_len)# BO进行结果修复
+            time_end = time.time()
+            print('cluster fix time = {}'.format(str(int(time_end)-int(time_start))))
+            # time_start = time.time()
+            # result = BO_fix_Thompson_sampling(result, mapping_edge_id_to_cost, mapping_node_id_to_bbox, mapping_node_id_to_features, device, source,tracklet_len)# BO进行结果修复
+            # time_end = time.time()
+            # bo_fix_time = time_end - time_start
+            # print('computing time: ' + str(time_end - time_start))
+            split_each_track, valid_mask = update_split_each_track_valid_mask(result)
+            current_video_segment_predicted_tracks, current_video_segment_predicted_tracks_confidence_score, current_video_segment_predicted_tracks_bboxes, current_video_segment_representative_frames,current_video_segment_predicted_tracks_bboxes_test,current_trajectory_similarity_dict,current_video_segment_all_traj_all_object_features = convert_track_to_stitch_format(split_each_track,mapping_node_id_to_bbox,mapping_node_id_to_features)
+            # current_video_segment_predicted_tracks, current_video_segment_predicted_tracks_bboxes, current_video_segment_all_traj_all_object_features, _ = interpolation_fix_missed_detections(current_video_segment_predicted_tracks, current_video_segment_predicted_tracks_bboxes, current_video_segment_all_traj_all_object_features, tracklet_pose_collection)
+            frame_list = np.unique([mapping_node_id_to_bbox[x][2] for x in mapping_node_id_to_bbox])
+            curr_last_frame_node_list = [x for x in mapping_node_id_to_bbox if mapping_node_id_to_bbox[x][2] == frame_list[-1]]  # 当前batch
+            unique_frame_list = sorted(np.unique([mapping_node_id_to_bbox[x][2] for x in mapping_node_id_to_bbox]))
+            ##### 修正之后当前batch的图片写入  ########
+            for frame_name in unique_frame_list:
+                curr_img = cv2.imread(os.path.join(source, frame_name))
+                for human_id in current_video_segment_predicted_tracks_bboxes: # 第一帧所有的human_id与轨迹id相同
+                    for bbox in current_video_segment_predicted_tracks_bboxes[human_id]: # dict bbox:key
+                        if bbox == frame_name: #  写入帧数，轨迹数，坐标
+                            left, top = int(current_video_segment_predicted_tracks_bboxes[human_id][bbox][0][0]), int(current_video_segment_predicted_tracks_bboxes[human_id][bbox][0][1])
+                            cv2.putText(curr_img, str(human_id), (left, top), cv2.FONT_HERSHEY_SIMPLEX, 2,(0, 255, 0), 3)
+                if not os.path.exists(os.path.join(source.split(source.split('/')[-1])[0], 'results_all', source.split('/')[-1] + '_vis_fixed/')):
+                    os.makedirs(os.path.join(source.split(source.split('/')[-1])[0], 'results_all', source.split('/')[-1] + '_vis_fixed/'))
+                cv2.imwrite(os.path.join(source.split(source.split('/')[-1])[0], 'results_all', source.split('/')[-1] + '_vis_fixed/') + str(tracklet_inner_cnt) + '_' + frame_name, curr_img)
+
+            # if previous_video_segment_predicted_tracks != {}:
+            if batch_id > 1:
+                curr_first_frame_node_list = [x for x in mapping_node_id_to_bbox if mapping_node_id_to_bbox[x][2] == frame_list[0]]
+                node_matching_dict = {}
+                for idx,curr_node in enumerate(curr_first_frame_node_list):  # 对应关系？？？
+                    node_matching_dict[curr_node] = prev_last_frame_node_list[idx]
+                # prev_last_frame_node_list , curr_first_frame_node_list
+                result_dict,previous_unmatched_tracks,curr_unmatched_tracks = stitching_tracklets(node_matching_dict,tracklet_inner_cnt, current_video_segment_predicted_tracks, previous_video_segment_predicted_tracks, current_video_segment_predicted_tracks_bboxes, previous_video_segment_predicted_tracks_bboxes, current_video_segment_representative_frames, previous_video_segment_representative_frames,current_video_segment_predicted_tracks_bboxes_test,previous_video_segment_predicted_tracks_bboxes_test,unmatched_tracks_memory_dict)
+                # result_dict,previous_unmatched_tracks,curr_unmatched_tracks = stitching_tracklets_revised_bidirectional(previous_video_segment_predicted_tracks_bboxes_test,current_video_segment_predicted_tracks_bboxes_test)
+                # result_dict,previous_unmatched_tracks,curr_unmatched_tracks = stitching_tracklets_revised(kmedoids_instance,current_video_segment_predicted_tracks_bboxes_test,current_trajectory_similarity_dict,previous_video_segment_predicted_tracks_bboxes_test,previous_trajectory_similarity_dict,node_matching_dict,mapping_node_id_to_features,mapping_node_id_to_bbox)
+                # print('curr_unmatched_tracks',curr_unmatched_tracks)
+                # print('previous_unmatched_tracks', previous_unmatched_tracks)
+                # print('stitch result:',result_dict)
+            # for track in [1,2,4,5]:
+            #     print(np.mean([cosine_similarity(np.array(current_video_segment_predicted_tracks_bboxes_test[track][node][3]),np.array(track1[549][3])) for node in current_video_segment_predicted_tracks_bboxes_test[track]]))
+            split_each_track, _ = update_split_each_track_valid_mask(result)  # 得到单独每条轨迹
+            #     result_dict, current_video_segment_predicted_tracks, current_video_segment_predicted_tracks_backup, current_video_segment_predicted_tracks_bboxes_backup, current_video_segment_representative_frames_backup, current_video_segment_all_traj_all_object_features_backup,_ = \
+            # stitching_tracklets(tracklet_inner_cnt, current_video_segment_predicted_tracks, previous_video_segment_predicted_tracks, current_video_segment_predicted_tracks_bboxes, previous_video_segment_predicted_tracks_bboxes, current_video_segment_representative_frames, current_video_segment_all_traj_all_object_features, previous_video_segment_representative_frames, previous_video_segment_all_traj_all_object_features, average_sampling_density_hori_vert)
+
+            start_frame_name = '%03d'%min([int(mapping_node_id_to_bbox[x][2].split('.')[0]) for x in mapping_node_id_to_bbox])+'.jpg' if \
+                               min([int(mapping_node_id_to_bbox[x][2].split('.')[0]) for x in mapping_node_id_to_bbox]) < 1000 else \
+                               '%03d' % min([int(mapping_node_id_to_bbox[x][2].split('.')[0]) for x in mapping_node_id_to_bbox]) + '.jpg' #???
+            if not os.path.exists(os.path.join(source.split(source.split('/')[-1])[0], 'results', source.split('/')[-1] + '_SSP_EM/')):
+                # source.split(source.split('/')[-1])[0]：'/usr/local/SSP_EM/'
+                #os.mkdir(os.path.join(source.split(source.split('/')[-1])[0], 'results', source.split('/')[-1] + '_SSP_EM/'))
+                os.makedirs(os.path.join(source.split(source.split('/')[-1])[0], 'results', source.split('/')[-1] + '_SSP_EM/'))
+            curr_batch_txt = open(os.path.join(source.split(source.split('/')[-1])[0], 'results', source.split('/')[-1] + '_SSP_EM/') + start_frame_name.replace('.jpg', '.txt'), 'a')
+            # curr_batch_txt = open('/media/allenyljiang/Seagate_Backup_Plus_Drive/usr/local/VIBE-master/data/neurocomputing/results/mot20_test2/05_0019_SSP_EM/' + '05_0019_' + start_frame_name.replace('.jpg', '.txt'), 'a')
+            # #######   整个轨迹txt写入  ########
+            # '''
+            # 下一个batch写入上一个batch的数据
+            # '''
+            # # 1、如果是第一个batch则不进行数据写入
+            # new_track_id = 0
+            # if not os.path.exists(os.path.join(source.split(source.split('/')[-1])[0], 'results_all')):
+            #     os.makedirs(os.path.join(source.split(source.split('/')[-1])[0], 'results_all'))
+            # if not os.path.exists(os.path.join(source.split(source.split('/')[-1])[0], 'results_all', source.split('/')[-1] + '_vis/')):
+            #     os.makedirs(os.path.join(source.split(source.split('/')[-1])[0], 'results_all', source.split('/')[-1] + '_vis/'))
+            # if batch_id == 1:
+            #     current_video_segment_predicted_tracks_backup = copy.deepcopy(current_video_segment_predicted_tracks)
+            #     current_video_segment_predicted_tracks_bboxes_backup = copy.deepcopy(current_video_segment_predicted_tracks_bboxes)
+            #     current_video_segment_representative_frames_backup = copy.deepcopy(current_video_segment_representative_frames)
+            #     current_video_segment_predicted_tracks_bboxes_test_backup = copy.deepcopy(current_video_segment_predicted_tracks_bboxes_test)
+            #     current_trajectory_similarity_dict_backup = copy.deepcopy(current_trajectory_similarity_dict)
+            #     #all_video_predicted_tracks = copy.deepcopy(current_video_segment_predicted_tracks_bboxes)
+            #     total_txt = open(os.path.join(source.split(source.split('/')[-1])[0], 'results_all/') + (source.split('/')[-2]+'.txt'), 'w')
+            #     base_track_id += len(split_each_track)  # 给没有匹配上的轨迹起始编号
+            #     # for frame_name in unique_frame_list:
+            #     #     # curr_img = cv2.imread(os.path.join(source, frame_name))
+            #     #     for human_id in current_video_segment_predicted_tracks_bboxes: # 第一帧所有的human_id与轨迹id相同
+            #     #         for bbox in current_video_segment_predicted_tracks_bboxes[human_id]: # dict bbox:key
+            #     #             if bbox == frame_name: #  写入帧数，轨迹数，坐标
+            #     #                 left, top = int(current_video_segment_predicted_tracks_bboxes[human_id][bbox][0][0]), int(current_video_segment_predicted_tracks_bboxes[human_id][bbox][0][1])
+            #     #                 cv2.putText(curr_img, str(human_id), (left, top), cv2.FONT_HERSHEY_SIMPLEX, 2,(0, 255, 0), 3)
+            #         # if not os.path.exists(os.path.join(source.split(source.split('/')[-1])[0], 'results_all', source.split('/')[-1] + '_vis/')):
+            #         #     os.makedirs(os.path.join(source.split(source.split('/')[-1])[0], 'results_all', source.split('/')[-1] + '_vis/'))
+            #         # cv2.imwrite(os.path.join(source.split(source.split('/')[-1])[0], 'results_all', source.split('/')[-1] + '_vis/') + str(tracklet_inner_cnt) + '_' + frame_name, curr_img)
+            # else: # 写入上一个batch的数据
+            #     total_txt = open(os.path.join(source.split(source.split('/')[-1])[0], 'results_all/') + (source.split('/')[-2]+'.txt'), 'a')
+            #     # frame_list = [unique_frame_list[-1]] # int类型不可以迭代
+            #     frame_list = unique_frame_list[-batch_stride_write:]
+            #     if batch_id == batch_cnt:
+            #         frame_list = unique_frame_list[-(total_frames - (batch_id - 1) * batch_stride - 1):]
+            #     ### 对上一个batch的数据进行改正 ###
+            #     previous_delete_track_dict = {}
+            #     for human_id in previous_video_segment_predicted_tracks_bboxes:
+            #         track = previous_video_segment_predicted_tracks_bboxes_test[human_id]
+            #         track_importance = np.mean([track[node][2] for node in track])
+            #         if batch_id == 2:
+            #             if track_importance < 0.75 or track_importance*math.sqrt(len(track)) < 2:
+            #                 previous_delete_track_dict[human_id] = track_importance
+            #                 continue
+            #         elif track_importance*math.sqrt(len(track)) < 2:
+            #             previous_delete_track_dict[human_id] = track_importance * math.sqrt(len(track))
+            #     previous_delete_track_list = list(previous_delete_track_dict.keys())
+            #     [previous_video_segment_predicted_tracks_bboxes.pop(trackid) for trackid in previous_delete_track_list]
+            #
+            #     #### 以下为修正之后汇总的画图以及数据写入 ####
+            #     if batch_id != 2: # 第2个batch的时候需要写入的数据是上一个batch的全部
+            #         frame_list_iter1 = previous_frame_list[-batch_stride_write:]
+            #         base_track_cnt = len(set(curr_unmatched_tracks_dict.keys()).intersection(set(previous_delete_track_list)))
+            #         # base_track_id -= base_track_cnt # ???? 减去上一个batch新出现但是错误的
+            #     else:
+            #         frame_list_iter1 = previous_frame_list
+            #     for frame_name in frame_list_iter1:
+            #         curr_img = cv2.imread(os.path.join(source, frame_name))
+            #         for human_id in previous_video_segment_predicted_tracks_bboxes:
+            #             for bbox in previous_video_segment_predicted_tracks_bboxes[human_id]: # dict bbox:key
+            #                 if bbox == frame_name: #  写入帧数，轨迹数，坐标
+            #                     left, top = int(previous_video_segment_predicted_tracks_bboxes[human_id][bbox][0][0]), int(previous_video_segment_predicted_tracks_bboxes[human_id][bbox][0][1])
+            #                     cv2.putText(curr_img, str(human_id), (left, top), cv2.FONT_HERSHEY_SIMPLEX, 2,(0, 255, 0), 3)
+            #                     total_txt.write(str(int(frame_name.split('.')[0])) + ',' + str(human_id) + ',' + \
+            #                      str(previous_video_segment_predicted_tracks_bboxes[human_id][bbox][0][0]) + ',' + \
+            #                      str(previous_video_segment_predicted_tracks_bboxes[human_id][bbox][0][1]) + ',' + \
+            #                      str(previous_video_segment_predicted_tracks_bboxes[human_id][bbox][1][0]-previous_video_segment_predicted_tracks_bboxes[human_id][bbox][0][0]) + ',' + \
+            #                      str(previous_video_segment_predicted_tracks_bboxes[human_id][bbox][1][1]-previous_video_segment_predicted_tracks_bboxes[human_id][bbox][0][1]) + ',-1,-1,-1,-1\n') # mot格式：必须10个数
+            #         cv2.imwrite(os.path.join(source.split(source.split('/')[-1])[0], 'results_all', source.split('/')[-1] + '_vis/') + str(tracklet_inner_cnt-batch_stride) + '_' + frame_name, curr_img) # 写入前一个batch的时候需要减去batch_stride
+            #
+            #     # [current_video_segment_representative_frames_backup.pop(track_id) for track_id in previous_delete_track_list]
+            #     # [current_video_segment_predicted_tracks_bboxes_test_backup.pop(track_id) for track_id in previous_delete_track_list]
+            #     # [current_trajectory_similarity_dict_backup.pop(track_id) for track_id in previous_delete_track_list]
+            #     curr_unmatched_tracks_dict = {} #
+            #     #### 此处进行id索引的变化 ####
+            #     for human_id in current_video_segment_predicted_tracks_bboxes: # track_id,索引仍然按照该batch得到的轨迹来,只是改变写入到总的txt以及画的图当中的结果
+            #         if human_id not in result_dict:
+            #             # 如果是新增轨迹的话,之后的batch才可能有新增轨迹
+            #             new_track_id += 1
+            #             human_id_txt = base_track_id + new_track_id # 写入结果中的轨迹id
+            #             result_dict[human_id] = human_id_txt
+            #             if human_id in curr_unmatched_tracks:
+            #                 curr_unmatched_tracks_dict[human_id_txt] = human_id
+            #         else:
+            #             human_id_txt = result_dict[human_id] # 写入的时候改为前一个batch当中轨迹值
+            #         current_video_segment_predicted_tracks_bboxes_backup[human_id_txt] = current_video_segment_predicted_tracks_bboxes[human_id]
+            #         current_video_segment_predicted_tracks_backup[human_id_txt] = current_video_segment_predicted_tracks[human_id]
+            #         current_video_segment_representative_frames_backup[human_id_txt] = current_video_segment_representative_frames[human_id]
+            #         current_video_segment_predicted_tracks_bboxes_test_backup[human_id_txt] = current_video_segment_predicted_tracks_bboxes_test[human_id]
+            #         current_trajectory_similarity_dict_backup[human_id_txt] = current_trajectory_similarity_dict[human_id]
+            #     # [current_video_segment_predicted_tracks_bboxes_backup.pop(track_id) for track_id in previous_delete_track_list]
+            #     # [current_video_segment_predicted_tracks_backup.pop(track_id) for track_id in previous_delete_track_list]
+            #     if batch_id == batch_cnt: # 最后一个batch还需要写入当前batch的数据
+            #         for frame_name in frame_list:
+            #             curr_img = cv2.imread(os.path.join(source, frame_name))
+            #             for human_id in current_video_segment_predicted_tracks_bboxes_backup:
+            #                 track = current_video_segment_predicted_tracks_bboxes_test_backup[human_id]
+            #                 track_importance = np.mean([track[node][2] for node in track])
+            #                 if track_importance*math.sqrt(len(track)) < 2:
+            #                 # print('delete previous track {0}'.format(human_id))
+            #                     continue
+            #                 for bbox in current_video_segment_predicted_tracks_bboxes_backup[human_id]:
+            #                     if bbox == frame_name: #  写入帧数，轨迹数，坐标
+            #                         left, top = int(current_video_segment_predicted_tracks_bboxes_backup[human_id][bbox][0][0]), int(current_video_segment_predicted_tracks_bboxes_backup[human_id][bbox][0][1])
+            #                         cv2.putText(curr_img, str(human_id), (left, top), cv2.FONT_HERSHEY_SIMPLEX, 2,(0, 255, 0), 3)
+            #                         total_txt.write(str(int(frame_name.split('.')[0])) + ',' + str(human_id) + ',' + \
+            #                          str(current_video_segment_predicted_tracks_bboxes_backup[human_id][bbox][0][0]) + ',' + \
+            #                          str(current_video_segment_predicted_tracks_bboxes_backup[human_id][bbox][0][1]) + ',' + \
+            #                          str(current_video_segment_predicted_tracks_bboxes_backup[human_id][bbox][1][0]-current_video_segment_predicted_tracks_bboxes_backup[human_id][bbox][0][0]) + ',' + \
+            #                          str(current_video_segment_predicted_tracks_bboxes_backup[human_id][bbox][1][1]-current_video_segment_predicted_tracks_bboxes_backup[human_id][bbox][0][1]) + ',-1,-1,-1,-1\n') # mot格式：必须10个数
+            #             cv2.imwrite(os.path.join(source.split(source.split('/')[-1])[0], 'results_all', source.split('/')[-1] + '_vis/') + str(tracklet_inner_cnt) + '_' + frame_name, curr_img)
+            #     total_txt.close()
+            #     base_track_id += len(curr_unmatched_tracks) # 更新base_track_id
+            #     for unmatch in (set(previous_unmatched_tracks)- set(previous_delete_track_list)): # 保留上一次未匹配的轨迹，每次会有很多重复的
+            #         if unmatch not in unmatched_tracks_memory_dict:
+            #             unmatched_tracks_memory_dict[unmatch] = 1 # 初始化未配对次数
+            #         else:
+            #             unmatched_tracks_memory_dict[unmatch] += 1 # 次数+1
+            #         if unmatched_tracks_memory_dict[unmatch] >= 2: # 次数 >= 3之后忽略，认为轨迹终止
+            #             ###  需要把该轨迹删除掉 ###
+            #             if unmatch in current_video_segment_predicted_tracks_bboxes_backup:
+            #                 current_video_segment_predicted_tracks_bboxes_backup.pop(unmatch)
+            #             if unmatch in current_video_segment_predicted_tracks_backup:
+            #                 current_video_segment_predicted_tracks_backup.pop(unmatch)
+            #             continue
+            #         current_video_segment_predicted_tracks_bboxes_backup[unmatch] = copy.deepcopy(previous_video_segment_predicted_tracks_bboxes[unmatch])
+            #         current_video_segment_predicted_tracks_backup[unmatch] = copy.deepcopy(previous_video_segment_predicted_tracks[unmatch])
+            # # 更新上一帧的值,注意都是使用backup来进行更新的
+            # previous_frame_list = copy.deepcopy(unique_frame_list)
+            # previous_video_segment_predicted_tracks = copy.deepcopy(current_video_segment_predicted_tracks_backup)
+            # previous_video_segment_predicted_tracks_bboxes = copy.deepcopy(current_video_segment_predicted_tracks_bboxes_backup)
+            # previous_video_segment_representative_frames = copy.deepcopy(current_video_segment_representative_frames_backup)
+            # previous_video_segment_predicted_tracks_bboxes_test = copy.deepcopy(current_video_segment_predicted_tracks_bboxes_test_backup)
+            # previous_trajectory_similarity_dict = copy.deepcopy(current_trajectory_similarity_dict_backup)
+            # prev_last_frame_node_list = copy.deepcopy(curr_last_frame_node_list)
+            # ## 清理内存
+            # current_video_segment_predicted_tracks.clear()
+            # current_video_segment_predicted_tracks_bboxes.clear()
+            # current_video_segment_representative_frames.clear()
+            # current_video_segment_all_traj_all_object_features.clear()
+            # current_video_segment_predicted_tracks_bboxes_backup.clear()
+            # current_video_segment_predicted_tracks_backup.clear()
+            # current_video_segment_representative_frames_backup.clear()
+            # current_video_segment_all_traj_all_object_features_backup.clear()
+
+            #######   整个轨迹txt写入  ########
+            '''
+            按照每个batch来写
+            '''
+            # previous_unmatched_tracks,curr_unmatched_tracks
+            # 如果是第一个batch则写入所有数据
+            new_track_id = 0
+            # current_video_segment_all_traj_all_object_features_backup = copy.deepcopy(current_video_segment_all_traj_all_object_features)
+            if not os.path.exists(os.path.join(source.split(source.split('/')[-1])[0], 'results_all')):
+                os.makedirs(os.path.join(source.split(source.split('/')[-1])[0], 'results_all'))
+            if batch_id == 1:
+                current_video_segment_predicted_tracks_backup = copy.deepcopy(current_video_segment_predicted_tracks)
+                current_video_segment_predicted_tracks_bboxes_backup = copy.deepcopy(current_video_segment_predicted_tracks_bboxes)
+                current_video_segment_representative_frames_backup = copy.deepcopy(current_video_segment_representative_frames)
+                current_video_segment_predicted_tracks_bboxes_test_backup = copy.deepcopy(current_video_segment_predicted_tracks_bboxes_test)
+                current_trajectory_similarity_dict_backup = copy.deepcopy(current_trajectory_similarity_dict)
+                #all_video_predicted_tracks = copy.deepcopy(current_video_segment_predicted_tracks_bboxes)
+                total_txt = open(os.path.join(source.split(source.split('/')[-1])[0], 'results_all/') + (source.split('/')[-2]+'.txt'), 'w')
+                base_track_id += len(split_each_track)  # 给没有匹配上的轨迹起始编号
+                # frame_list = copy.deepcopy(unique_frame_list)
+                # curr_batch_txt = open(os.path.join(source.split(source.split('/')[-1])[0], 'results',source.split('/')[-1] + '_SSP_EM/') + start_frame_name.replace('.jpg', '.txt'), 'r')
+                # tracks = curr_batch_txt.readlines()
+                # total_txt.writelines(tracks)
+                # curr_batch_txt.close()
+                # total_txt.close()
+                for frame_name in unique_frame_list:
+                    curr_img = cv2.imread(os.path.join(source, frame_name))
+                    for human_id in current_video_segment_predicted_tracks_bboxes: # 第一帧所有的human_id与轨迹id相同
+                        for bbox in current_video_segment_predicted_tracks_bboxes[human_id]: # dict bbox:key
+                            if bbox == frame_name: #  写入帧数，轨迹数，坐标
+                                total_txt.write(str(int(frame_name.split('.')[0])) + ',' + str(human_id) + ',' + \
+                                                     str(current_video_segment_predicted_tracks_bboxes[human_id][bbox][0][0]) + ',' + \
+                                                     str(current_video_segment_predicted_tracks_bboxes[human_id][bbox][0][1]) + ',' + \
+                                                     str(current_video_segment_predicted_tracks_bboxes[human_id][bbox][1][0]-current_video_segment_predicted_tracks_bboxes[human_id][bbox][0][0]) + ',' + \
+                                                     str(current_video_segment_predicted_tracks_bboxes[human_id][bbox][1][1]-current_video_segment_predicted_tracks_bboxes[human_id][bbox][0][1]) + ',-1,-1,-1,-1\n') # mot格式：必须10个数
+                                left, top = int(current_video_segment_predicted_tracks_bboxes[human_id][bbox][0][0]), int(current_video_segment_predicted_tracks_bboxes[human_id][bbox][0][1])
+                                cv2.putText(curr_img, str(human_id), (left, top), cv2.FONT_HERSHEY_SIMPLEX, 2,(0, 255, 0), 3)
+                    if not os.path.exists(os.path.join(source.split(source.split('/')[-1])[0], 'results_all', source.split('/')[-1] + '_vis/')):
+                        os.makedirs(os.path.join(source.split(source.split('/')[-1])[0], 'results_all', source.split('/')[-1] + '_vis/'))
+                    cv2.imwrite(os.path.join(source.split(source.split('/')[-1])[0], 'results_all', source.split('/')[-1] + '_vis/') + str(tracklet_inner_cnt) + '_' + frame_name, curr_img)
+
+                total_txt.close()
+            else:
+                total_txt = open(os.path.join(source.split(source.split('/')[-1])[0], 'results_all/') + (source.split('/')[-2]+'.txt'), 'a')
+                # frame_list = [unique_frame_list[-1]] # int类型不可以迭代
+                frame_list = unique_frame_list[-batch_stride_write:] # int类型不可以迭代
+                if batch_id == batch_cnt:
+                    frame_list = unique_frame_list[-(total_frames - (batch_id-1)*batch_stride-1):]
+                for frame_name in frame_list: # 只写入最后一帧,根据步长决定
+                    curr_img = cv2.imread(os.path.join(source, frame_name))
+                    for human_id in current_video_segment_predicted_tracks_bboxes: # track_id,索引仍然按照该batch得到的轨迹来,只是改变写入到总的txt以及画的图当中的结果
+                        if human_id not in result_dict:
+                            # 如果是新增轨迹的话,之后的batch才可能有新增轨迹
+                            new_track_id += 1
+                            human_id_txt = base_track_id + new_track_id # 写入结果中的轨迹id
+                            result_dict[human_id] = human_id_txt
+                        else:
+                            human_id_txt = result_dict[human_id] # 写入的时候改为前一个batch当中轨迹值
+                        for bbox in current_video_segment_predicted_tracks_bboxes[human_id]: # dict bbox:key
+                            if bbox == frame_name: #  写入帧数，轨迹数，坐标
+                                total_txt.write(str(int(frame_name.split('.')[0])) + ',' + str(human_id_txt) + ',' + \
+                                                     str(current_video_segment_predicted_tracks_bboxes[human_id][bbox][0][0]) + ',' + \
+                                                     str(current_video_segment_predicted_tracks_bboxes[human_id][bbox][0][1]) + ',' + \
+                                                     str(current_video_segment_predicted_tracks_bboxes[human_id][bbox][1][0]-current_video_segment_predicted_tracks_bboxes[human_id][bbox][0][0]) + ',' + \
+                                                     str(current_video_segment_predicted_tracks_bboxes[human_id][bbox][1][1]-current_video_segment_predicted_tracks_bboxes[human_id][bbox][0][1]) + ',-1,-1,-1,-1\n') # mot格式：必须10个数
+                                left, top = int(current_video_segment_predicted_tracks_bboxes[human_id][bbox][0][0]), int(current_video_segment_predicted_tracks_bboxes[human_id][bbox][0][1])
+
+                                cv2.putText(curr_img, str(human_id_txt), (left, top), cv2.FONT_HERSHEY_SIMPLEX, 2,(0, 255, 0), 3)
+                        current_video_segment_predicted_tracks_bboxes_backup[human_id_txt] = current_video_segment_predicted_tracks_bboxes[human_id]
+                        current_video_segment_predicted_tracks_backup[human_id_txt] = current_video_segment_predicted_tracks[human_id]
+                        current_video_segment_representative_frames_backup[human_id_txt] = current_video_segment_representative_frames[human_id]
+                        current_video_segment_predicted_tracks_bboxes_test_backup[human_id_txt] = current_video_segment_predicted_tracks_bboxes_test[human_id]
+                        current_trajectory_similarity_dict_backup[human_id_txt] = current_trajectory_similarity_dict[human_id]
+
+                    if not os.path.exists(os.path.join(source.split(source.split('/')[-1])[0], 'results_all', source.split('/')[-1] + '_vis/')):
+                        os.makedirs(os.path.join(source.split(source.split('/')[-1])[0], 'results_all', source.split('/')[-1] + '_vis/'))
+                    cv2.imwrite(os.path.join(source.split(source.split('/')[-1])[0], 'results_all', source.split('/')[-1] + '_vis/') + str(tracklet_inner_cnt) + '_' + frame_name, curr_img)
+
+                total_txt.close()
+                base_track_id += len(curr_unmatched_tracks) # 更新base_track_id
+
+                for unmatch in previous_unmatched_tracks: # 保留上一次未匹配的轨迹，每次会有很多重复的
+                    if unmatch not in unmatched_tracks_memory_dict:
+                        unmatched_tracks_memory_dict[unmatch] = 1 # 初始化未配对次数
+                    else:
+                        unmatched_tracks_memory_dict[unmatch] += 1 # 次数+1
+                    if unmatched_tracks_memory_dict[unmatch] >= 10: # 次数 >= 3之后忽略，认为轨迹终止
+                        continue
+                    current_video_segment_predicted_tracks_bboxes_backup[unmatch] = copy.deepcopy(previous_video_segment_predicted_tracks_bboxes[unmatch])
+                    current_video_segment_predicted_tracks_backup[unmatch] = copy.deepcopy(previous_video_segment_predicted_tracks[unmatch])
+
+            # current_video_segment_predicted_tracks_bboxes = copy.deepcopy(current_video_segment_predicted_tracks_bboxes_backup)
+            # current_video_segment_predicted_tracks = copy.deepcopy(current_video_segment_predicted_tracks_backup)
+            # current_video_segment_representative_frames = copy.deepcopy(current_video_segment_representative_frames_backup)
+            # current_video_segment_all_traj_all_object_features = copy.deepcopy(current_video_segment_all_traj_all_object_features_backup)
+            # 更新上一帧的值
+            previous_video_segment_predicted_tracks = copy.deepcopy(current_video_segment_predicted_tracks_backup)
+            previous_video_segment_predicted_tracks_bboxes = copy.deepcopy(current_video_segment_predicted_tracks_bboxes_backup)
+            previous_video_segment_representative_frames = copy.deepcopy(current_video_segment_representative_frames_backup)
+            previous_video_segment_predicted_tracks_bboxes_test = copy.deepcopy(current_video_segment_predicted_tracks_bboxes_test_backup)
+            previous_trajectory_similarity_dict = copy.deepcopy(current_trajectory_similarity_dict_backup)
+
+            prev_last_frame_node_list = copy.deepcopy(curr_last_frame_node_list)
+            # previous_video_segment_predicted_tracks_bboxes_test = copy.deepcopy(current_video_segment_predicted_tracks_bboxes_test)
+            # previous_video_segment_all_traj_all_object_features = copy.deepcopy(current_video_segment_all_traj_all_object_features_backup)
+            ## 清理内存
+            current_video_segment_predicted_tracks.clear()
+            current_video_segment_predicted_tracks_bboxes.clear()
+            current_video_segment_representative_frames.clear()
+            current_video_segment_all_traj_all_object_features.clear()
+            current_video_segment_predicted_tracks_bboxes_backup.clear()
+            current_video_segment_predicted_tracks_backup.clear()
+            current_video_segment_representative_frames_backup.clear()
+            current_video_segment_all_traj_all_object_features_backup.clear()
+
+        tracklet_inner_cnt += batch_stride  # 步长
+            # print('after a batch')
+            # objgraph.most_common_types(limit=50)
+            # objgraph.show_growth()
+            # print(str(time.time()))
 
 def parse_opt():
     parser = argparse.ArgumentParser()#　照片要jpg格式
     # /usr/local/SSP_EM/05_0019
     # /home/allenyljiang/Documents/Dataset/MOT20/train/MOT20-01/img1
-    parser.add_argument('--source', type=str, default='/home/allenyljiang/Documents/Dataset/MOT20/test/MOT20-08/img1_test', help='file/dir/URL/glob, 0 for webcam')#/media/allenyljiang/Seagate_Backup_Plus_Drive/usr/local/VIBE-master/data/neurocomputing/05_0019
+    parser.add_argument('--source', type=str, default='/home/allenyljiang/Documents/Dataset/MOT20/train/MOT20-01/img_test', help='file/dir/URL/glob, 0 for webcam')#/media/allenyljiang/Seagate_Backup_Plus_Drive/usr/local/VIBE-master/data/neurocomputing/05_0019
 
     opt = parser.parse_args()
     return opt
@@ -2379,8 +3492,12 @@ if __name__ == '__main__':
 
     input_opt = parse_opt()
     opt = {}
+    opt['name'] = 'yolox-s'
+    exp_file = None
+    exp = get_exp(exp_file,opt['name'])
     opt['cfg'] = r'/usr/local/lpn-pytorch-master/lpn-pytorch-master/experiments/coco/lpn/lpn101_256x192_gd256x2_gc.yaml'
-    opt['source'] = input_opt.source # r'/media/allenyljiang/Seagate_Backup_Plus_Drive/usr/local/VIBE-master/data/neurocomputing/05_0019'
+    opt['source'] = '/home/allenyljiang/Documents/Dataset/MOT20/train/MOT20-01/img1' # r'/media/allenyljiang/Seagate_Backup_Plus_Drive/usr/local/VIBE-master/data/neurocomputing/05_0019'
+    # opt['source'] = input_opt.source # r'/media/allenyljiang/Seagate_Backup_Plus_Drive/usr/local/VIBE-master/data/neurocomputing/05_0019'
     opt['modelDir'] = ''
     opt['logDir'] = ''
     opt['weights'] = ['weights/crowdhuman_yolov5m.pt']
@@ -2388,8 +3505,8 @@ if __name__ == '__main__':
     opt['output'] = 'cache/'
     opt['track_out'] = 'cache/'
     opt['img_size'] = 960
-    opt['conf_thres'] = 0.25 # 0.25
-    opt['iou_thres'] = 0.50
+    opt['conf_thres'] = 0.25
+    opt['iou_thres'] = 0.7
     opt['device'] = '0'#'1'
     opt['view_img'] = False
     opt['save_txt'] = False
@@ -2402,6 +3519,19 @@ if __name__ == '__main__':
     opt['opts'] = ['model.load_similarity_weights',
                    r'similarity_module/model/osnet_x0_25_market_256x128_amsgrad_ep180_stp80_lr0.003_b128_fb10_softmax_labelsmooth_flip.pth', \
                    'test.evaluate_similarity_module', 'True']
+    args = make_parser().parse_args()#解析参数
+    exp = get_exp(args.exp_file, args.name)# 模型参数（键值对形式）
+
+    # seq_path = '/home/allenyljiang/Documents/Dataset/MOT20'
+    # phase = 'train' # 'test'
+    # pattern = os.path.join(seq_path,phase,'*','img1')
+    # for source in glob.glob(pattern):
+    #     opt['source'] = source
+    #     detect(opt,exp,args)
+
+    detect(opt,exp,args)
+
+
     # tracemalloc.start(25)
     # snapshot = tracemalloc.take_snapshot()
     # # global snapshot
@@ -2414,7 +3544,14 @@ if __name__ == '__main__':
     #         continue
     #     logger.warning(stat)
     # snapshot = tracemalloc.take_snapshot()
-    detect(opt)
+    # /home/allenyljiang/Documents/Dataset/MOT20/train/MOT20-01/img1
+
+    # seq_path = '/home/allenyljiang/Documents/Dataset/MOT20'
+    # phase = 'test' # 'test'
+    # pattern = os.path.join(seq_path,phase,'*','img1')
+    # for source in glob.glob(pattern):
+    #     opt['source'] = source
+    #     detect(opt)
 
     #snapshot = tracemalloc.take_snapshot()
     # tracemalloc_snapshot(snapshot)
@@ -2424,11 +3561,11 @@ if __name__ == '__main__':
     # for stat in top_stats:
     #     print(stat)
 # 运行时间分析
-# pyinstrument -r html MOT_demo_v14_based_on_reid_v22_notstandard_yolov5_add_face_remove_skeleton_ref.py
+# pyinstrument -r html MOT_demo_v14_based_on_reid_v22_notstandard_yolov5_add_face_remove_skeleton_ref_v7.py
 # 内存监测
 #  python -m memory_profiler MOT_demo_v14_based_on_reid_v22_notstandard_yolov5_add_face_remove_skeleton_ref.py
 '''
 mprof run --multiprocess MOT_demo_v14_based_on_reid_v22_notstandard_yolov5_add_face_remove_skeleton_ref.py
 mprof plot
-python -m memory_profiler --pdb-mmem=2000 MOT_demo_v14_based_on_reid_v22_notstandard_yolov5_add_face_remove_skeleton_ref.py
+python -m memory_profiler --pdb-mmem=2000 MOT_demo_v14_based_on_reid_v22_notstandard_yolov5_add_face_remove_skeleton_ref_v7.py
 '''
