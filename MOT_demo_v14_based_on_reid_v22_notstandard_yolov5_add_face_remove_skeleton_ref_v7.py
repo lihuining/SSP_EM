@@ -950,7 +950,7 @@ def convert_to_coco_format(dataloader, outputs, info_imgs, ids):
             data_list.append(pred_data)
     return data_list
 
-def tracklet_collection(dataloader,img_size,outputs, info_imgs, ids, box_detected, box_confidence_scores, tracklet_pose_collection, bbox_confidence_threshold, tracklet_inner_cnt,source):
+def tracklet_collection(dataloader,img_size,outputs, info_imgs, ids, box_detected, box_confidence_scores, tracklet_pose_collection,tracklet_pose_collection_second, bbox_confidence_threshold, tracklet_inner_cnt,source):
     # pred - predicted human bounding boxes with confidences
     # path - to current image for pose estimation
     # out - output directory
@@ -985,9 +985,11 @@ def tracklet_collection(dataloader,img_size,outputs, info_imgs, ids, box_detecte
         box_detected.append([(float(bboxes[ind][0].data.cpu().numpy()), float(bboxes[ind][1].data.cpu().numpy())), (float(bboxes[ind][2].data.cpu().numpy()), float(bboxes[ind][3].data.cpu().numpy()))])
         box_confidence_scores.append(float(scores[ind].data.cpu().numpy()) + 1e-4*random.random())
 
-    box_detected = [box_detected[box_confidence_scores.index(x)] for x in box_confidence_scores if x > bbox_confidence_threshold] # 0.4
-    box_confidence_scores = [box_confidence_scores[box_confidence_scores.index(x)] for x in box_confidence_scores if x > bbox_confidence_threshold]
-
+    box_detected_high = [box_detected[box_confidence_scores.index(x)] for x in box_confidence_scores if x >= bbox_confidence_threshold] # 0.4
+    box_confidence_scores_high = [box_confidence_scores[box_confidence_scores.index(x)] for x in box_confidence_scores if x >= bbox_confidence_threshold]
+    min_conf = 0.1
+    box_detected_second = [box_detected[box_confidence_scores.index(x)] for x in box_confidence_scores if x < bbox_confidence_threshold and x > min_conf]
+    box_confidence_scores_second = [box_confidence_scores[box_confidence_scores.index(x)] for x in box_confidence_scores if x < bbox_confidence_threshold and x > min_conf]
         # if len(box_detected) > maximum_number_people:
         #     lowest_confidence_idx = box_confidence_scores.index(min(box_confidence_scores))
         #     box_detected.pop(lowest_confidence_idx)
@@ -997,14 +999,21 @@ def tracklet_collection(dataloader,img_size,outputs, info_imgs, ids, box_detecte
         return tracklet_pose_collection
     path = os.path.join(source,info_imgs[4][0].split('/')[-1])  # info_imgs[4] 是一个list
     tracklet_pose_collection_tmp = {}
-    tracklet_pose_collection_tmp['bbox_list'] = box_detected
-    tracklet_pose_collection_tmp['box_confidence_scores'] = box_confidence_scores
+    tracklet_pose_collection_tmp['bbox_list'] = box_detected_high
+    tracklet_pose_collection_tmp['box_confidence_scores'] = box_confidence_scores_high
     tracklet_pose_collection_tmp['img_dir'] = path
     tracklet_pose_collection_tmp['foreignmatter_bbox_list'] = []
     tracklet_pose_collection_tmp['foreignmatter_box_confidence_scores'] = []
     tracklet_pose_collection.append(tracklet_pose_collection_tmp)
+    ## second thresh ##
+    tracklet_pose_collection_second_tmp = {}
+    tracklet_pose_collection_second_tmp['bbox_list'] = box_detected_second
+    tracklet_pose_collection_second_tmp['box_confidence_scores'] = box_confidence_scores_second
+    tracklet_pose_collection_second_tmp['img_dir'] = path
+    tracklet_pose_collection_second.append(tracklet_pose_collection_second_tmp)
+    
 
-    return tracklet_pose_collection
+    return tracklet_pose_collection,tracklet_pose_collection_second
 def conduct_pose_estimation(webcam, path, out, im0s, pred, img, dataset, save_txt, save_img, view_img, box_detected, head_box_detected, foreignmatter_box_detected, box_confidence_scores, head_box_confidence_scores, foreignmatter_box_confidence_scores, centers, scales, vid_path, vid_writer, vid_cap, tracklet_pose_collection, names, colors, pose_transform, bbox_confidence_threshold, tracklet_inner_cnt, need_face_recognition_switch, face_verification_thresh, nms_thresh):
     # pred - predicted human bounding boxes with confidences
     # path - to current image for pose estimation
@@ -2938,10 +2947,7 @@ def detect(opt,exp,args):
     # seq_path = '/home/allenyljiang/Documents/Dataset/MOT20'
     # phase = 'train' # 'test'
     # pattern = os.path.join(seq_path,phase,'*','img1')
-# for source in glob.glob(pattern):
-    tracklet_pose_collection = []
-    # if half:
-    #     model.half()  # to FP16
+    # for source in glob.glob(pattern):
     tensor_type = torch.cuda.HalfTensor if half else torch.cuda.FloatTensor
     model.eval()
     if half:  # True
@@ -2954,6 +2960,7 @@ def detect(opt,exp,args):
     tracklet_inner_cnt = 0  # tracklet_inner_cnt is an integer indicating the index of the last frame in current batch of frames for tracking, a batch of tracklet_len frames are processed together each time
 
     tracklet_pose_collection = []
+    tracklet_pose_collection_second = []
     tracklet_pose_collection_backup = []
     if not os.path.exists(track_out):
         os.mkdir(track_out)
@@ -3047,7 +3054,7 @@ def detect(opt,exp,args):
         # 每次只保存当前batch的结果
         # tracklet_pose_collection = conduct_pose_estimation(webcam, path, out, im0s, pred, img, dataset, save_txt, save_img, view_img, box_detected, head_box_detected, foreignmatter_box_detected, box_confidence_scores, head_box_confidence_scores, foreignmatter_box_confidence_scores, centers, scales, vid_path, vid_writer, vid_cap, tracklet_pose_collection, names, colors, pose_transform, bbox_confidence_threshold, tracklet_inner_cnt, need_face_recognition_switch, face_verification_thresh, opt['iou_thres'])
         ############ tracklet pose collection #########
-        tracklet_pose_collection = tracklet_collection(dataloader,img_size,pred, info_imgs, ids, box_detected, box_confidence_scores, tracklet_pose_collection, bbox_confidence_threshold, tracklet_inner_cnt,source)
+        tracklet_pose_collection,tracklet_pose_collection_second = tracklet_collection(dataloader,img_size,pred, info_imgs, ids, box_detected, box_confidence_scores, tracklet_pose_collection,tracklet_pose_collection_second, bbox_confidence_threshold, tracklet_inner_cnt,source)
         # tracklet_pose_collection_tmp = json.loads(det.readline())
         # tracklet_pose_collection.append(tracklet_pose_collection_tmp)
         if total_frames <= tracklet_len: # 不足一个batch
@@ -3135,13 +3142,6 @@ def detect(opt,exp,args):
             gc.collect()
             torch.cuda.empty_cache()
             # print(torch.cuda.memory_summary(device=0, abbreviated=False))
-
-            half_person_num = len(curr_tracklet_input_people)
-            # curr_tracklet_input_people_part1 = curr_tracklet_input_people[:round(half_person_num/2),:,:,:]
-            # curr_tracklet_input_people_part2 = curr_tracklet_input_people[round(half_person_num/2):,:,:,:]
-            # features_first_half = similarity_module(torch.from_numpy(curr_tracklet_input_people[:round(half_person_num/2),:,:,:].astype('float32')).cuda()).data.cpu()
-            # features_last_half = similarity_module(torch.from_numpy(curr_tracklet_input_people[round(half_person_num/2):,:,:,:].astype('float32')).cuda()).data.cpu()
-            # features =
             with torch.no_grad():
                 features = similarity_module(torch.from_numpy(curr_tracklet_input_people.astype('float32')).cuda()).data.cpu()
             # 计算所有input people的特征向量
@@ -3289,9 +3289,6 @@ def detect(opt,exp,args):
                         time_end_prepare_costs = time.time()
 
                 node_id_cnt += len(curr_frame_dict['bbox_list'])
-
-            # mapping_frameid_bbox_to_features.clear()
-
             # time_end = time.time()
             # error_computing_end_time = time.time()
             #print('error computing time: ' + str(error_computing_end_time - error_computing_start_time))
@@ -3348,10 +3345,23 @@ def detect(opt,exp,args):
                     os.makedirs(os.path.join(source.split(source.split('/')[-1])[0], 'results_all', source.split('/')[-1] + '_vis_ssp/'))
                 cv2.imwrite(os.path.join(source.split(source.split('/')[-1])[0], 'results_all', source.split('/')[-1] + '_vis_ssp/') + str(tracklet_inner_cnt) + '_' + frame_name, curr_img)
                 # cv2.imwrite('/media/allenyljiang/Seagate_Backup_Plus_Drive/usr/local/VIBE-master/data/neurocomputing/results/mot20_test2/05_0019_vis/' + str(tracklet_inner_cnt) + '_' + frame_name, curr_img)
-            #curr_batch_txt.close()
+            ### data prepare for second match ###
+            mapping_node_id_to_bbox_second = {}
+            initial_id = max(list(mapping_node_id_to_bbox.keys()))
+            for frame_collection in tracklet_pose_collection_second:
+                bbox_list = frame_collection['bbox_list']
+                box_confidence_list = frame_collection['box_confidence_scores']
+                path = frame_collection['img_dir']
+                for id,box in enumerate(bbox_list):
+                    initial_id += 1
+                    mapping_node_id_to_bbox_second[initial_id] = []
+                    mapping_node_id_to_bbox_second[initial_id].append(bbox_list[id])
+                    mapping_node_id_to_bbox_second[initial_id].append(box_confidence_list[id])
+                    mapping_node_id_to_bbox_second[initial_id].append(path.split('/')[-1])
+
             time_start = time.time()
             # result = BO_fix_Thompson_sampling(result, mapping_edge_id_to_cost, mapping_node_id_to_bbox, mapping_node_id_to_features, device, source,tracklet_len)# BO进行结果修复
-            result = cluster_fix(result, mapping_edge_id_to_cost, mapping_node_id_to_bbox, mapping_node_id_to_features, device, source,tracklet_len)# BO进行结果修复
+            result = cluster_fix(result, mapping_edge_id_to_cost, mapping_node_id_to_bbox,mapping_node_id_to_bbox_second, mapping_node_id_to_features, device, source,tracklet_len)# BO进行结果修复
             time_end = time.time()
             print('cluster fix time = {}'.format(str(int(time_end)-int(time_start))))
             # time_start = time.time()
@@ -3688,7 +3698,7 @@ if __name__ == '__main__':
     exp_file = None
     exp = get_exp(exp_file,opt['name'])
     opt['cfg'] = r'/usr/local/lpn-pytorch-master/lpn-pytorch-master/experiments/coco/lpn/lpn101_256x192_gd256x2_gc.yaml'
-    opt['source'] = '/home/allenyljiang/Documents/Dataset/MOT20/test/MOT20-06/img1' # r'/media/allenyljiang/Seagate_Backup_Plus_Drive/usr/local/VIBE-master/data/neurocomputing/05_0019'
+    opt['source'] = '/home/allenyljiang/Documents/Dataset/MOT20/train/MOT20-01/img1' # r'/media/allenyljiang/Seagate_Backup_Plus_Drive/usr/local/VIBE-master/data/neurocomputing/05_0019'
     # opt['source'] = input_opt.source # r'/media/allenyljiang/Seagate_Backup_Plus_Drive/usr/local/VIBE-master/data/neurocomputing/05_0019'
     opt['modelDir'] = ''
     opt['logDir'] = ''

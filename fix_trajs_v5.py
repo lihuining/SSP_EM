@@ -561,7 +561,7 @@ def compute_overlap_single_box(curr_img_boxes, next_img_boxes):# Order: top, bot
         corresponding_coefficient = 0.0
     return corresponding_coefficient
 
-def cluster_fix(result, mapping_edge_id_to_cost, mapping_node_id_to_bbox, mapping_node_id_to_features, device, source,tracklet_len):
+def cluster_fix(result, mapping_edge_id_to_cost, mapping_node_id_to_bbox, mapping_node_id_to_bbox_second,mapping_node_id_to_features, device, source,tracklet_len):
     global batch_id
     # global tracklet_len
     # initialize parameters for BO
@@ -679,10 +679,9 @@ def cluster_fix(result, mapping_edge_id_to_cost, mapping_node_id_to_bbox, mappin
     normed_reid_data = scaler.fit_transform(reid_matrix)
 
     pca = PCA()
-
     pca.fit(normed_reid_data)
     explaned_variance = pca.explained_variance_ratio_
-    explaned_variance_sum = np.cumsum(explaned_variance)
+    # explaned_variance_sum = np.cumsum(explaned_variance)
     bbox_matrix = np.array([np.array(mapping_node_id_to_bbox[x][0]).flatten() for x in indefinite_node])
     width = bbox_matrix[:,2] - bbox_matrix[:,0]
     height = bbox_matrix[:,3] - bbox_matrix[:,1]
@@ -704,26 +703,49 @@ def cluster_fix(result, mapping_edge_id_to_cost, mapping_node_id_to_bbox, mappin
     time_matrix = np.array([int(mapping_node_id_to_bbox[x][2].split('.')[0]) for x in indefinite_node]).reshape(-1, 1)
 
     data = np.concatenate((reid_pca, bbox_matrix,aspect_ratio,area,time_matrix), axis=1)
-    cluster = KMeans(n_clusters=n_clusters, random_state=0).fit(data)
+    # cluster = KMeans(n_clusters=n_clusters, random_state=0).fit(data)
     # centroid = cluster.cluster_centers_
     # y_pred = cluster.labels_
     ### clustering ###
     # 1. Load list of points for cluster analysis.
     # sample = read_sample(FCPS_SAMPLES.SAMPLE_TWO_DIAMONDS)
-    sample = data
-    # 2. Prepare initial centers using K-Means++ method.
-    initial_centers = kmeans_plusplus_initializer(sample, n_clusters,random_state=1).initialize()
 
+    # 2. Prepare initial centers using K-Means++ method.
+    ## 可以先找出中心点索引，加入到initial_centers当中这个list来 ##
+    sample = data
+    initial_centers = kmeans_plusplus_initializer(sample, n_clusters,random_state=1).initialize() # list,为每个node当中点的信息
+
+    ## 以下为data_second当中的数据 ##
+    reid_second = np.zeros((len(mapping_node_id_to_bbox_second),4))              # (33,4)
+    bbox_matrix_second  = np.array([np.array(mapping_node_id_to_bbox_second[x][0]).flatten() for x in mapping_node_id_to_bbox_second])
+    width_second = bbox_matrix_second[:,2] - bbox_matrix_second[:,0]
+    height_second = bbox_matrix_second[:,3] - bbox_matrix_second[:,1]
+    aspect_ratio_second = 10*(width_second / height_second).reshape(-1, 1)
+    area_second = (width_second * height_second).reshape(-1, 1)/100
+    time_matrix_second = np.array([int(mapping_node_id_to_bbox_second[x][2].split('.')[0]) for x in mapping_node_id_to_bbox_second]).reshape(-1, 1)
+    data_second = np.concatenate((reid_second, bbox_matrix_second, aspect_ratio_second, area_second, time_matrix_second), axis=1)
+
+    sample = np.concatenate((data,data_second),axis=0)
     # 3. create metric that will be used for clustering
 
     def my_distance(point1, point2):
-        dimension = len(point1)
-        result = 0.0
-        for i in range(dimension - 1):
-            result += abs(point1[i] - point2[i]) ** 2
-        eps = 0.01
-        if point1[dimension - 1] == point2[dimension - 1]:
-            result += 1 / eps
+        if np.any(point1[:4]) and np.any(point2[:4]): # reid均不为0
+            dimension = len(point1)
+            result = 0.0
+            for i in range(dimension - 1):
+                result += abs(point1[i] - point2[i]) ** 2
+            eps = 0.01
+            if point1[dimension - 1] == point2[dimension - 1]:
+                result += 1 / eps
+        else:
+            dimension = len(point1)
+            result = 0.0
+            for i in range(4,dimension - 1): # 不计算reid误差
+                result += abs(point1[i] - point2[i]) ** 2
+            eps = 0.01
+            if point1[dimension - 1] == point2[dimension - 1]:
+                result += 1 / eps
+
         return result
 
     my_metric = distance_metric(type_metric.USER_DEFINED, func=my_distance)
@@ -742,7 +764,7 @@ def cluster_fix(result, mapping_edge_id_to_cost, mapping_node_id_to_bbox, mappin
     #     for node in track:
     #         mapping_dict[indefinite_node[node]] = mapping_node_id_to_bbox[indefinite_node[node]]
     #     cluster_tracks[remained_tracks[idx]] = mapping_dict
-
+    indefinite_node.append(list(mapping_node_id_to_bbox_second.keys()))
     for idx, track in enumerate(clusters):
         mapping_dict = {}
         for node in track:
