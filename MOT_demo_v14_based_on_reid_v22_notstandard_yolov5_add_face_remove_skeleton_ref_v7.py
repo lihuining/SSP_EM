@@ -197,6 +197,108 @@ IMAGE_EXT = [".jpg", ".jpeg", ".webp", ".bmp", ".png"]
 0.7
 --mot20
 '''
+def track_processing(split_each_track,mapping_node_id_to_bbox,mapping_node_id_to_features,split_each_track_valid_mask):
+    iou_thresh = 0.55 # 0.789
+    iou_thresh_step = 0.017 # 0.017
+    curr_predicted_tracks = {}
+    curr_predicted_tracks_bboxes = {}
+    curr_predicted_tracks_bboxes_test = {} # 测试使用
+    curr_predicted_tracks_confidence_score = {}
+    curr_representative_frames = {}
+    mapping_frameid_to_human_centers = {}  # 暂存curr_predicted_tracks的value
+    mapping_frameid_to_bbox = {}
+    mapping_frameid_to_confidence_score = {}
+    trajectory_node_dict = {}
+    trajectory_idswitch_dict = {}
+    trajectory_idswitch_reliability_dict = {} # 保存每条轨迹切断的每一段置信度  key:trajectory id value:list eg[1,3,5]  the sum of node_valid_mask
+    trajectory_segment_nodes_dict = {}
+    for track_id in split_each_track:
+        # curr_predicted_tracks[track_id] = mapping_frameid_to_human_centers
+        confidence_score_max = 0
+        node_id_max = 0
+        # print(track_id,' started!' )
+        mapping_track_time_to_bbox = {}
+        trajectory_node_list = []
+        trajectory_idswitch_list = []
+        trajectory_idswitch_reliability_list = []
+        # trajectory_similarity_list = []
+        trajectory_idswitch_reliability = 0
+        trajectory_segment_list = []
+        trajectory_segment = []
+        for idx,node_pair in enumerate(split_each_track[track_id]):  # node，edge
+            # if int(node_pair[1]) % 2 == 0:
+            if idx % 2 == 0: # 偶数位置表示人的node
+                node_id = int(node_pair[1] )/ 2
+                trajectory_node_list.append(int(node_id))
+                # print(node_id)
+            else:
+                continue
+            # mapping_node_id_to_bbox[mapping_node_id_to_bbox.index(int(node_pair[0]))][2] # str:img
+            frame_id = mapping_node_id_to_bbox[node_id][2]  # 转化为int进行加减
+            bbox = mapping_node_id_to_bbox[node_id][0]
+            # [bbox_pre[0][1], bbox_pre[1][1], bbox_pre[0][0], bbox_pre[1][0]]
+            idx_tmp = 1  # initial value
+            if idx >= 1:
+                iou_similarity = compute_iou_single_box([bbox[0][1], bbox[1][1], bbox[0][0], bbox[1][0]],[bbox_pre[0][1], bbox_pre[1][1], bbox_pre[0][0], bbox_pre[1][0]])
+                #print(iou_similarity)
+                #velocity_x = (bbox[0][0] + bbox[1][0]) / 2 - (bbox_pre[0][0] + bbox_pre[1][0]) / 2 # x-axis
+                #velocity_y = (bbox[0][1] + bbox[1][1]) / 2 - (bbox_pre[0][1] + bbox_pre[1][1]) / 2 # y-axis
+                iou_thresh_tmp = iou_thresh + int((idx-idx_tmp)/2)*iou_thresh_step
+                if iou_similarity < iou_thresh_tmp:
+                        #or (np.sign(velocity_x*velocity_x_pre)+np.sign(velocity_y*velocity_y_pre)) == -2:
+                    #print(track_id,idx,iou_similarity)
+                    trajectory_idswitch_list.append(int(idx/2)) # id从0开始
+                    idx_tmp = int(idx)
+                    # iou_thresh_tmp = copy.deepcopy(iou_thresh)
+                    trajectory_idswitch_reliability_list.append(trajectory_idswitch_reliability)
+                    trajectory_segment_list.append(trajectory_segment[:])
+                    trajectory_idswitch_reliability = 0
+                    trajectory_segment = []
+
+            # if idx >= 1:
+            #     iou_similarity = compute_iou_single_box([bbox[0][1], bbox[1][1], bbox[0][0], bbox[1][0]],[bbox_pre[0][1], bbox_pre[1][1], bbox_pre[0][0], bbox_pre[1][0]])
+            #     # print(iou_similarity)
+            # if idx >= 1 and iou_similarity < iou_thresh:
+            #     # print(track_id,idx,iou_similarity)
+            #     trajectory_idswitch_list.append(int(idx/2))
+            #     trajectory_idswitch_reliability_list.append(trajectory_idswitch_reliability)
+            #     trajectory_idswitch_reliability = 0
+            #
+            if split_each_track_valid_mask[track_id][idx] == 1:
+                trajectory_idswitch_reliability += 1
+            trajectory_segment.append(int(node_id))
+            bbox_pre = copy.deepcopy(bbox)
+
+            confidence_score = mapping_node_id_to_bbox[node_id][1]
+            if confidence_score > confidence_score_max:
+                confidence_score_max = confidence_score
+                node_id_max = node_id
+            mapping_frameid_to_human_centers[int(frame_id.split('.')[0])] = [(bbox[0][0] + bbox[1][0]) / 2,
+                                                                             (bbox[0][1] + bbox[1][1]) / 2]  # 同一帧中图片相连?
+            mapping_frameid_to_bbox[frame_id] = bbox
+            # mapping_frameid_to_bbox[frame_id] = [bbox,confidence_score]
+            mapping_frameid_to_confidence_score[frame_id] = confidence_score
+            mapping_track_time_to_bbox[int(node_id)] = [frame_id,bbox,confidence_score]
+            # current_video_segment_all_traj_all_object_features[track_id] = [[node_id], mapping_node_id_to_features[node_id]]  # ???
+        trajectory_idswitch_reliability_list.append(trajectory_idswitch_reliability)
+        trajectory_segment_list.append(trajectory_segment)
+        trajectory_node_dict[track_id] = copy.deepcopy(trajectory_node_list)
+        trajectory_idswitch_dict[track_id] = copy.deepcopy(trajectory_idswitch_list)
+        trajectory_idswitch_reliability_dict[track_id] = copy.deepcopy(trajectory_idswitch_reliability_list)
+        trajectory_segment_nodes_dict[track_id] = copy.deepcopy(trajectory_segment_list)
+        curr_predicted_tracks[track_id] = copy.deepcopy(mapping_frameid_to_human_centers) # 直接等于之后操作会影响到curr_predicted_tracks
+        curr_predicted_tracks_bboxes[track_id] = copy.deepcopy(mapping_frameid_to_bbox)
+        curr_predicted_tracks_bboxes_test[track_id] = copy.deepcopy(mapping_track_time_to_bbox)
+        curr_predicted_tracks_confidence_score[track_id] = copy.deepcopy(mapping_frameid_to_confidence_score)
+        # 可能刚好在第一个
+        if node_id_max == 0:
+            node_id_max =  list(mapping_track_time_to_bbox.keys())[0]
+        curr_representative_frames[track_id] = [node_id_max,(bbox[1][1] - bbox[0][1], bbox[1][0] - bbox[0][0]),mapping_node_id_to_features[node_id_max]]  # 高度,宽度
+        mapping_frameid_to_human_centers.clear()
+        mapping_frameid_to_bbox.clear()
+        mapping_frameid_to_confidence_score.clear()
+    return curr_predicted_tracks_bboxes_test,trajectory_node_dict,trajectory_idswitch_dict,trajectory_idswitch_reliability_dict,trajectory_segment_nodes_dict
+
 def make_parser():
     # python tools/demo_track.py -h 查看帮助信息/--help
     # 使用时顺序无关紧要
@@ -982,6 +1084,11 @@ def tracklet_collection(dataloader,img_size,outputs, info_imgs, ids, box_detecte
         #     "score": scores[ind].numpy().item(),
         #     "segmentation": [],
         # }  # COCO json format
+        width = abs(float(bboxes[ind][2].data.cpu().numpy()) - float(bboxes[ind][0].data.cpu().numpy()))
+        heigth = abs(float(bboxes[ind][1].data.cpu().numpy()) - float(bboxes[ind][3].data.cpu().numpy()))
+        aspect_ratio = width / heigth
+        if aspect_ratio > 1.6 or width*heigth < 100:
+            continue
         box_detected.append([(float(bboxes[ind][0].data.cpu().numpy()), float(bboxes[ind][1].data.cpu().numpy())), (float(bboxes[ind][2].data.cpu().numpy()), float(bboxes[ind][3].data.cpu().numpy()))])
         box_confidence_scores.append(float(scores[ind].data.cpu().numpy()) + 1e-4*random.random())
 
@@ -1006,6 +1113,7 @@ def tracklet_collection(dataloader,img_size,outputs, info_imgs, ids, box_detecte
     tracklet_pose_collection_tmp['foreignmatter_box_confidence_scores'] = []
     tracklet_pose_collection.append(tracklet_pose_collection_tmp)
     ## second thresh ##
+    # if len(box_detected_second) > 0: # 只有大于0的时候才加入
     tracklet_pose_collection_second_tmp = {}
     tracklet_pose_collection_second_tmp['bbox_list'] = box_detected_second
     tracklet_pose_collection_second_tmp['box_confidence_scores'] = box_confidence_scores_second
@@ -1192,9 +1300,76 @@ def conduct_pose_estimation(webcam, path, out, im0s, pred, img, dataset, save_tx
 # person_to_person_matching_matrix_copy_normalized: matching matrix between current pair of frames, #rows = #people in former frame #cols = #people in latter frame, float
 # idx_stride_between_frame_pair: stride between current batch of frames, int
 # node_id_cnt: int, same as input
-def compute_inter_person_similarity_worker(input_list, whether_use_iou_similarity_or_not):
-    # tracklet_inner_idx: 帧索引 tracklet_inner_base_idx:当前batch开始的帧    node_id_cnt
+# def compute_inter_person_similarity_worker(input_list, whether_use_iou_similarity_or_not):
+#     # tracklet_inner_idx: 帧索引 tracklet_inner_base_idx:当前batch开始的帧    node_id_cnt
+#
+#     tracklet_inner_idx, tracklet_inner_base_idx, node_id_cnt, tracklet_pose_collection, idx_stride_between_frame_pair, maximum_possible_number, max_row_num_of_person_to_person_matching_matrix_normalized, \
+#         max_col_num_of_person_to_person_matching_matrix_normalized, num_of_person_to_person_matching_matrix_normalized_copies, node_id_cnt_list, all_people_features = \
+#         input_list[0], input_list[1], input_list[2], input_list[3], input_list[4], input_list[5], input_list[6], input_list[7], input_list[8], input_list[9], input_list[10]
+#
+#     # collect all bounding boxes in frame pairs
+#     curr_frame_dict = tracklet_pose_collection[tracklet_inner_idx]  # 当前帧tracklet信息
+#     next_frame_dict = tracklet_pose_collection[tracklet_inner_idx + idx_stride_between_frame_pair] # 下一个桢tracklet信息
+#
+#     # matrix storing the iou similarity between each box from previous frame and each box from next frame, each row corresponds to one box in prev, each col - one box in next
+#     person_to_person_matching_matrix = np.ones((len(curr_frame_dict['bbox_list']), len(next_frame_dict['bbox_list']))) * maximum_possible_number #  乘以max_number的含义?
+#     # matrix storing the appearance similarity between ...
+#     person_to_person_matching_matrix_iou = np.zeros((len(curr_frame_dict['bbox_list']), len(next_frame_dict['bbox_list'])))
+#     # ????
+#     person_to_person_depth_matching_matrix_iou = np.ones((len(curr_frame_dict['bbox_list']), len(next_frame_dict['bbox_list']))) * 0.5
+#
+#     # evaluate_time_start = time.time()
+#     for curr_person_bbox_coord in curr_frame_dict['bbox_list']:
+#         for next_person_bbox_coord in next_frame_dict['bbox_list']:
+#             # to find the index of each bounding box in all people in current batch of frames
+#             # if curr_frame_dict['box_confidence_scores'][curr_frame_dict['bbox_list'].index(curr_person_bbox_coord)] > 1.0 or next_frame_dict['box_confidence_scores'][next_frame_dict['bbox_list'].index(next_person_bbox_coord)] > 1.0:
+#             #     person_to_person_matching_matrix[curr_frame_dict['bbox_list'].index(curr_person_bbox_coord), next_frame_dict['bbox_list'].index(next_person_bbox_coord)] = 1.0
+#             # else:
+#             vector1 = all_people_features.data.numpy()[int(np.sum([len(x['bbox_list']) for x in tracklet_pose_collection[0:tracklet_inner_idx]]) + curr_frame_dict['bbox_list'].index(curr_person_bbox_coord))] # 当前帧bbox的特征向量
+#             vector2 = all_people_features.data.numpy()[int(np.sum([len(x['bbox_list']) for x in tracklet_pose_collection[0:(tracklet_inner_idx + idx_stride_between_frame_pair)]]) + next_frame_dict['bbox_list'].index(next_person_bbox_coord))] # 下一帧bbox的特征向量
+#             person_to_person_matching_matrix[curr_frame_dict['bbox_list'].index(curr_person_bbox_coord), next_frame_dict['bbox_list'].index(next_person_bbox_coord)] = \
+#                 1.0 - min([np.dot(vector1, vector2)/(np.linalg.norm(vector1)*np.linalg.norm(vector2)), 1.0])
+#
+#             person_to_person_matching_matrix_iou[
+#                 curr_frame_dict['bbox_list'].index(curr_person_bbox_coord), next_frame_dict['bbox_list'].index(next_person_bbox_coord)] = \
+#                 min([max([compute_iou_single_box([curr_person_bbox_coord[0][1], curr_person_bbox_coord[1][1], curr_person_bbox_coord[0][0], curr_person_bbox_coord[1][0]], \
+#                     [next_person_bbox_coord[0][1], next_person_bbox_coord[1][1], next_person_bbox_coord[0][0], next_person_bbox_coord[1][0]]), 0.0]), 1.0])
+#
+#             person_to_person_depth_matching_matrix_iou[
+#                 curr_frame_dict['bbox_list'].index(curr_person_bbox_coord), next_frame_dict['bbox_list'].index(next_person_bbox_coord)] = \
+#                 1.0 / max([abs(curr_person_bbox_coord[1][1] - next_person_bbox_coord[1][1]), \
+#                            person_to_person_depth_matching_matrix_iou[curr_frame_dict['bbox_list'].index(curr_person_bbox_coord), next_frame_dict['bbox_list'].index(next_person_bbox_coord)]])
+#
+#     evaluate_time_end = time.time()
+#     # corner case: only one person
+#     if person_to_person_matching_matrix.shape[0] == 1 and person_to_person_matching_matrix.shape[1] == 1 and person_to_person_matching_matrix[0][0] == 0.0:
+#         person_to_person_matching_matrix[0][0] = 1.0
+#     else:
+#         # replace zero entries in the matrix "person_to_person_matching_matrix" with half minimum value to facilitate division
+#         person_to_person_matching_matrix[np.where(person_to_person_matching_matrix==0)] = np.min(person_to_person_matching_matrix[np.where(person_to_person_matching_matrix>0)]) / 2.0
+#         # similarity is inversely proportional to matching error
+#         person_to_person_matching_matrix = 1.0 / person_to_person_matching_matrix / np.max(
+#             1.0 / person_to_person_matching_matrix)  # similarity
+#     # similarity is the summation of appearance and iou similarity
+#     if whether_use_iou_similarity_or_not:
+#         person_to_person_matching_matrix = person_to_person_matching_matrix * person_to_person_matching_matrix_iou # * person_to_person_depth_matching_matrix_iou
+#     person_to_person_matching_matrix_copy = copy.deepcopy(person_to_person_matching_matrix)
+#     denominator = person_to_person_matching_matrix_copy.max(axis=1).reshape(person_to_person_matching_matrix_copy.max(axis=1).shape[0], 1)
+#     denominator[np.where(denominator==0)] = 1.0
+#     person_to_person_matching_matrix_copy_normalized = person_to_person_matching_matrix_copy / denominator
+#     for idx_col in range(person_to_person_matching_matrix_copy_normalized.shape[1]):
+#         if len(np.where(person_to_person_matching_matrix_copy_normalized[:, idx_col]==1.0)[0].tolist()) > 1:
+#             list_idx_compete = np.where(person_to_person_matching_matrix_copy_normalized[:, idx_col] == 1.0)[0].tolist()
+#             list_idx_compete_ori = np.argsort(person_to_person_matching_matrix_copy[:, idx_col][list_idx_compete]).tolist()
+#             list_idx_compete_ordered = np.array(list_idx_compete)[list_idx_compete_ori].tolist()
+#             for list_idx_compete_ordered_ele in list_idx_compete_ordered:
+#                 person_to_person_matching_matrix_copy_normalized[list_idx_compete_ordered_ele, :] *= 0.99**(len(list_idx_compete_ordered)-1-list_idx_compete_ordered.index(list_idx_compete_ordered_ele))
+#     person_to_person_matching_matrix_copy_normalized *= 200
+#
+#     return person_to_person_matching_matrix_copy_normalized, idx_stride_between_frame_pair, node_id_cnt
 
+def compute_inter_person_similarity_worker(input_list, whether_use_iou_similarity_or_not,whether_use_reid_similarity_or_not):
+    # tracklet_inner_idx: 帧索引 tracklet_inner_base_idx:当前batch开始的帧    node_id_cnt
     tracklet_inner_idx, tracklet_inner_base_idx, node_id_cnt, tracklet_pose_collection, idx_stride_between_frame_pair, maximum_possible_number, max_row_num_of_person_to_person_matching_matrix_normalized, \
         max_col_num_of_person_to_person_matching_matrix_normalized, num_of_person_to_person_matching_matrix_normalized_copies, node_id_cnt_list, all_people_features = \
         input_list[0], input_list[1], input_list[2], input_list[3], input_list[4], input_list[5], input_list[6], input_list[7], input_list[8], input_list[9], input_list[10]
@@ -1243,8 +1418,11 @@ def compute_inter_person_similarity_worker(input_list, whether_use_iou_similarit
         person_to_person_matching_matrix = 1.0 / person_to_person_matching_matrix / np.max(
             1.0 / person_to_person_matching_matrix)  # similarity
     # similarity is the summation of appearance and iou similarity
-    if whether_use_iou_similarity_or_not:
+    if whether_use_iou_similarity_or_not and whether_use_reid_similarity_or_not:
         person_to_person_matching_matrix = person_to_person_matching_matrix * person_to_person_matching_matrix_iou # * person_to_person_depth_matching_matrix_iou
+    elif whether_use_iou_similarity_or_not and not whether_use_reid_similarity_or_not:# 只使用iou信息
+        person_to_person_matching_matrix = person_to_person_matching_matrix_iou
+    # 默认情况下为只是用reid信息
     person_to_person_matching_matrix_copy = copy.deepcopy(person_to_person_matching_matrix)
     denominator = person_to_person_matching_matrix_copy.max(axis=1).reshape(person_to_person_matching_matrix_copy.max(axis=1).shape[0], 1)
     denominator[np.where(denominator==0)] = 1.0
@@ -1259,7 +1437,6 @@ def compute_inter_person_similarity_worker(input_list, whether_use_iou_similarit
     person_to_person_matching_matrix_copy_normalized *= 200
 
     return person_to_person_matching_matrix_copy_normalized, idx_stride_between_frame_pair, node_id_cnt
-
 # input:
 # current_video_segment_representative_frames_current_tracklet_id: a floating vector describing the reid features of an identity in current batch of frames
 # previous_video_segment_all_traj_all_object_features: a dict, each key is an ID in previous batch of frames, each value is corresponding feature vector in representative frame
@@ -2793,7 +2970,147 @@ def convert_track_to_stitch_format(split_each_track,mapping_node_id_to_bbox,mapp
         mapping_frameid_to_confidence_score.clear()
         mapping_frameid_to_object_features.clear()
     return curr_predicted_tracks,curr_predicted_tracks_confidence_score,curr_predicted_tracks_bboxes,curr_representative_frames,curr_predicted_tracks_bboxes_test,trajectory_similarity_dict,curr_video_segment_all_traj_all_object_features
+def mapping_data_preparation(tracklet_pose_collection,similarity_module,tracklet_inner_cnt,whether_use_reid_similarity_or_not):
+    curr_tracklet_input_people, mapping_frameid_bbox_to_features, curr_tracklet_input_people_center_coords = convert_list_dict_to_np(tracklet_pose_collection, 256, 128)# 近10帧
+    gc.collect()
+    torch.cuda.empty_cache()
+    # print(torch.cuda.memory_summary(device=0, abbreviated=False))
+    with torch.no_grad():
+        features = similarity_module(torch.from_numpy(curr_tracklet_input_people.astype('float32')).cuda()).data.cpu()
+    # 计算所有input people的特征向量
+    # Tensor(79,512)
+    reid_end_time = time.time()
+    # mapping_frameid_bbox_to_features 的值替换为bbox的特征
+    for mapping_frameid_bbox_to_features_key in mapping_frameid_bbox_to_features.keys():
+        mapping_frameid_bbox_to_features[mapping_frameid_bbox_to_features_key] = features.data.numpy()[mapping_frameid_bbox_to_features[mapping_frameid_bbox_to_features_key], :].tolist()
+    if dump_switch == 1:
+        if not os.path.exists(os.path.join(dump_curr_video_name)):
+            os.mkdir(os.path.join(dump_curr_video_name))
+            # np.save(os.path.join(dump_curr_video_name, 'features: frame' + str(tracklet_inner_cnt + 1 - tracklet_len) + 'to' + str(tracklet_inner_cnt) + '.npy'), features)
+        out_file = os.path.join(dump_curr_video_name, 'tracklet_pose_collection_frame' + str(tracklet_inner_cnt + 1 - tracklet_len) + 'to' + str(tracklet_inner_cnt) + '.json')
+        json.dump(tracklet_pose_collection[tracklet_inner_cnt + 1 - tracklet_len: tracklet_inner_cnt + 1], codecs.open(out_file, 'w', encoding='utf-8'), separators=(',', ':'), sort_keys=True)
+        out_file = os.path.join(dump_curr_video_name, 'features_frame' + str(tracklet_inner_cnt + 1 - tracklet_len) + 'to' + str(tracklet_inner_cnt) + '.json')
+        json.dump(features.tolist(), codecs.open(out_file, 'w', encoding='utf-8'), separators=(',', ':'), sort_keys=True)
+        out_file = os.path.join(dump_curr_video_name, 'mapping_frameid_bbox_to_features_frame' + str(tracklet_inner_cnt + 1 - tracklet_len) + 'to' + str(tracklet_inner_cnt) + '.json')
+        json.dump(mapping_frameid_bbox_to_features, codecs.open(out_file, 'w', encoding='utf-8'), separators=(',', ':'), sort_keys=True)
+    ############################################################################################################################################
+    mapping_node_id_to_bbox = {} # dict:79 包含每个node的bbox位置置信度以及帧名
+    mapping_node_id_to_features = {} #　dict: key=str(imgname,bbox) value=feature
+    mapping_edge_id_to_cost = {} #　每个id与下一帧每个id的损失　
+    mapping_node_id_to_keypoint = {}
+    node_id_cnt = 1 #
+    ###################################################################### multiprocessing for computing matching error between people
+    # error_computing_start_time = time.time()
+    # number of frame-to-frame pairs for matching
+    num_of_person_to_person_matching_matrix_normalized_copies = 0
+    # for multi-process, the matching between each pair of frames produces a matrix with number of rows equal to the number of people in the former frame and
+    # number of cols equal to the number of people in the latter frame, this variable stores the maximum number of rows throughout all frame pairs
+    max_row_num_of_person_to_person_matching_matrix_normalized = 0 #所有当前帧中最大值
+    # for multi-process, the matching between each pair of frames produces a matrix with number of rows equal to the number of people in the former frame and
+    # number of cols equal to the number of people in the latter frame, this variable stores the maximum number of cols throughout all frame pairs
+    max_col_num_of_person_to_person_matching_matrix_normalized = 0 #所有下一帧中最大值
+    tracklet_inner_idx_list = []
+    node_id_cnt_list = []
+    parallel_tasks_args_list = []
+    for tracklet_inner_idx in range(0, tracklet_len):
+        curr_frame_dict = tracklet_pose_collection[tracklet_inner_idx]  # 当前处理帧
+        if len(curr_frame_dict['bbox_list']) == 0:
+            continue
+        for idx_stride_between_frame_pair in range(1, 3): # 配对帧之间步长最多为2
+            if tracklet_inner_idx + idx_stride_between_frame_pair >= len(tracklet_pose_collection): # 保证仍然在该batch内
+                continue
+    # current node idx (each node represents one person in a certain frame), collection of all human bounding boxes in current batch, stride between former and latter frames, an extremely large number
+            next_frame_dict = tracklet_pose_collection[tracklet_inner_idx + idx_stride_between_frame_pair]
+            if len(next_frame_dict['bbox_list']) == 0:
+                continue
+            parallel_tasks_args_list.append([tracklet_inner_idx, tracklet_inner_cnt - tracklet_len + 1, node_id_cnt, tracklet_pose_collection, idx_stride_between_frame_pair, maximum_possible_number]) # 当前batch起始帧位置
+            num_of_person_to_person_matching_matrix_normalized_copies += 1
+            max_row_num_of_person_to_person_matching_matrix_normalized = max([max_row_num_of_person_to_person_matching_matrix_normalized, len(curr_frame_dict['bbox_list'])])
+            max_col_num_of_person_to_person_matching_matrix_normalized = max([max_col_num_of_person_to_person_matching_matrix_normalized, len(next_frame_dict['bbox_list'])])
+        node_id_cnt += len(curr_frame_dict['bbox_list'])
+    # The matching matrix storing the matching relations between all pairs of frames
+    person_to_person_matching_matrix_normalized_collection = np.zeros((max_row_num_of_person_to_person_matching_matrix_normalized, max_col_num_of_person_to_person_matching_matrix_normalized, num_of_person_to_person_matching_matrix_normalized_copies))
+    result_person_to_person_matching_matrix_normalized_collection = copy.deepcopy(person_to_person_matching_matrix_normalized_collection)
+    # person_to_person_matching_matrix_normalized_collection = multiprocessing.RawArray('d', person_to_person_matching_matrix_normalized_collection.ravel())
+    for parallel_tasks_args_list_item in parallel_tasks_args_list:
+        tracklet_inner_idx_list.append(parallel_tasks_args_list_item[0])
+        node_id_cnt_list.append(parallel_tasks_args_list_item[2])
+        parallel_tasks_args_list[parallel_tasks_args_list.index(parallel_tasks_args_list_item)] = parallel_tasks_args_list_item + [max_row_num_of_person_to_person_matching_matrix_normalized, max_col_num_of_person_to_person_matching_matrix_normalized, num_of_person_to_person_matching_matrix_normalized_copies, node_id_cnt_list, features]
+    # with multiprocessing.Pool(processes=8) as pool:
+    whether_use_iou_similarity_or_not = True # (GetFaceSmdScore(im0s) > 0.7) # 如果清晰度大于阈值则使用iou_similarity
 
+    for parallel_tasks_args_list_item in parallel_tasks_args_list:
+        person_to_person_matching_matrix_normalized, idx_stride_between_frame_pair, node_id_cnt = compute_inter_person_similarity_worker(parallel_tasks_args_list_item, whether_use_iou_similarity_or_not,whether_use_reid_similarity_or_not)
+        # collect the results from multiprocessing and store the matching error between each pair of frames into result_person_to_person_matching_matrix_normalized_collection
+        result_person_to_person_matching_matrix_normalized_collection[0:person_to_person_matching_matrix_normalized.shape[0], \
+                                                                      0:person_to_person_matching_matrix_normalized.shape[1], \
+                                                                      [parallel_tasks_args_list.index(x) for x in parallel_tasks_args_list if (x[2]==node_id_cnt and x[4]==idx_stride_between_frame_pair)][0]] = person_to_person_matching_matrix_normalized
+    if dump_further_switch == 1:
+        if not os.path.exists(os.path.join(dump_curr_video_name)):
+            os.mkdir(os.path.join(dump_curr_video_name))
+        # '/usr/local/SSP_EM/tracking_for_integration/node_id_cnt_list_frame0to9.json'
+        out_file = os.path.join(dump_curr_video_name, 'node_id_cnt_list_frame' + str(tracklet_inner_cnt + 1 - tracklet_len) + 'to' + str(tracklet_inner_cnt) + '.json')
+        json.dump(node_id_cnt_list, codecs.open(out_file, 'w', encoding='utf-8'), separators=(',', ':'), sort_keys=True)
+        parallel_tasks_args_list_for_dump = copy.deepcopy(parallel_tasks_args_list)
+        for parallel_tasks_args_list_for_dump_idx in range(len(parallel_tasks_args_list_for_dump)):
+            parallel_tasks_args_list_for_dump[parallel_tasks_args_list_for_dump_idx][-1] = parallel_tasks_args_list_for_dump[parallel_tasks_args_list_for_dump_idx][-1].data.numpy().tolist() # Tensor转化
+        out_file = os.path.join(dump_curr_video_name, 'parallel_tasks_args_list_frame' + str(tracklet_inner_cnt + 1 - tracklet_len) + 'to' + str(tracklet_inner_cnt) + '.json')
+        json.dump(parallel_tasks_args_list_for_dump, codecs.open(out_file, 'w', encoding='utf-8'), separators=(',', ':'), sort_keys=True)
+    node_id_cnt = 1
+    for tracklet_inner_idx in range(0, tracklet_len):
+        # tracklet_pose_collection is a dict, each key is an integer of frame id, the value corresponding to the key is a dict with following keys:
+        # 'bbox_list': a list of bboxes in the frame, each bbox with floating data [(left coordinate, top coordinate), (right coordinate, bottom coordinate)], body bboxes
+        # 'head_bbox_list': a list of bboxes in the frame, each bbox with floating data [(left coordinate, top coordinate), (right coordinate, bottom coordinate)], head bboxes
+        # 'box_confidence_scores': a list of confidences of bboxes, each element is a floating number within range [0, 1]
+        # 'target_body_box_coord': a list with two elements, in the format of floating [(left coordinate, top coordinate), (right coordinate, bottom coordinate)], describe the bbox of the target person
+        # 'img_dir': a string describing the location for storing the frame, ending with '.jpg'
+        curr_frame_dict = tracklet_pose_collection[tracklet_inner_idx]
+        if len(curr_frame_dict['bbox_list']) == 0:
+            continue
+        # matching is conducted between (frame t, frame t+1) and (frame t, frame t+2), that is (frame t, frame t+idx_stride_between_frame_pair) with idx_stride_between_frame_pair=1, 2
+        for idx_stride_between_frame_pair in range(1, 3):
+            # if frame t and frame t+idx_stride_between_frame_pair all have detections
+            if tracklet_inner_idx + idx_stride_between_frame_pair < len(tracklet_pose_collection):
+                next_frame_dict = tracklet_pose_collection[tracklet_inner_idx + idx_stride_between_frame_pair]
+                if len(next_frame_dict['bbox_list']) == 0:
+                    continue
+                ############################################################# matching ######################################################
+                # introduction
+                # Now begin to obtain a matrix describing the matching error between people in two frames, each row corresponds to one person in current frame, each column corresponds to one person in next frame
+                # each element of parallel_tasks_args_list corresponds to one frame pair, one element consists of: frame idx of the former frame, starting frame idx of current batch of frames,
+                # starting node idx in former frame in a frame pair (each node represents one person in a certain frame), collection of all human bounding boxes in current batch, stride between former and latter frames, an extremely large number,
+                # maximum number of people in former frames from all frame pairs, maximum number of people in latter frames from all frame pairs, number of frame pairs for matching in current batch of frames,
+                # an integer list of starting node ids in former frame from all frame pairs, a floating array with shape num_people_in_current_batch_of_frames x 512 describing the reid features of all humans in current batch of frames
+                # input
+                # 0:len(curr_frame_dict['bbox_list']) - from 0 to the number of people in the former frame in frame pair
+                # 0:len(next_frame_dict['bbox_list']) - from 0 to the number of people in the latter frame in frame pair
+                # [parallel_tasks_args_list.index(x) for x in parallel_tasks_args_list if (x[2]==node_id_cnt and x[4]==idx_stride_between_frame_pair)][0] - the channel idx of the matrix describing matching relations between current frame pair in result_person_to_person_matching_matrix_normalized_collection
+                # output
+                # a floating matrix person_to_person_matching_matrix_normalized describing the matching relations between current batch of frames
+                person_to_person_matching_matrix_normalized = result_person_to_person_matching_matrix_normalized_collection[0:len(curr_frame_dict['bbox_list']), 0:len(next_frame_dict['bbox_list']), [parallel_tasks_args_list.index(x) for x in parallel_tasks_args_list if (x[2]==node_id_cnt and x[4]==idx_stride_between_frame_pair)][0]]
+                ########################################################## begin to prepare data for tracker ###################################################################
+                time_start_prepare_costs = time.time()
+                # mapping_frameid_bbox_to_features: a dict mapping string 'frameid_bbox coordinates' to a 512-D feature vector, the string 'frameid_bbox coordinates' has length 36, an example is '0930[(467.0, 313.0), (508.0, 424.0)]' where 0930 is frame id, the coordinates are in the format [(left, top), (right, bottom)]
+                mapping_node_id_to_bbox, mapping_node_id_to_features, mapping_edge_id_to_cost = prepare_costs_for_tracking_alg(idx_stride_between_frame_pair, curr_frame_dict, tracklet_pose_collection, next_frame_dict, person_to_person_matching_matrix_normalized, node_id_cnt, tracklet_inner_idx, mapping_node_id_to_bbox, mapping_node_id_to_features, mapping_edge_id_to_cost, mapping_frameid_bbox_to_features)
+                time_end_prepare_costs = time.time()
+        node_id_cnt += len(curr_frame_dict['bbox_list'])
+    # time_end = time.time()
+    # error_computing_end_time = time.time()
+    #print('error computing time: ' + str(error_computing_end_time - error_computing_start_time))
+    max_in_mapping_edge_id_to_cost = max([mapping_edge_id_to_cost[x] for x in mapping_edge_id_to_cost]) + 1e-6
+    if max_in_mapping_edge_id_to_cost >= 0:
+        for mapping_edge_id_to_cost_key in mapping_edge_id_to_cost:
+            mapping_edge_id_to_cost[mapping_edge_id_to_cost_key] = mapping_edge_id_to_cost[mapping_edge_id_to_cost_key] - max_in_mapping_edge_id_to_cost
+    if dump_further_switch == 1:
+        if not os.path.exists(os.path.join(dump_curr_video_name)):
+            os.mkdir(os.path.join(dump_curr_video_name))
+        out_file = os.path.join(dump_curr_video_name, 'input_to_track_mapping_node_id_to_bbox_frame' + str(tracklet_inner_cnt + 1 - tracklet_len) + 'to' + str(tracklet_inner_cnt) + '.json')
+        json.dump(mapping_node_id_to_bbox, codecs.open(out_file, 'w', encoding='utf-8'), separators=(',', ':'), sort_keys=True)
+        out_file = os.path.join(dump_curr_video_name, 'input_to_track_mapping_node_id_to_features_frame' + str(tracklet_inner_cnt + 1 - tracklet_len) + 'to' + str(tracklet_inner_cnt) + '.json')
+        json.dump(mapping_node_id_to_features, codecs.open(out_file, 'w', encoding='utf-8'), separators=(',', ':'), sort_keys=True)
+        out_file = os.path.join(dump_curr_video_name, 'input_to_track_mapping_edge_id_to_cost_frame' + str(tracklet_inner_cnt + 1 - tracklet_len) + 'to' + str(tracklet_inner_cnt) + '.json')
+        json.dump(mapping_edge_id_to_cost, codecs.open(out_file, 'w', encoding='utf-8'), separators=(',', ':'), sort_keys=True)
+    return mapping_node_id_to_bbox,mapping_edge_id_to_cost,mapping_node_id_to_features
 
 def detect(opt,exp,args):
     need_face_recognition_switch = 0
@@ -3067,11 +3384,13 @@ def detect(opt,exp,args):
                 continue
             elif len(tracklet_pose_collection) > tracklet_len and (len(tracklet_pose_collection)-tracklet_len)% batch_stride == 0:
                 tracklet_pose_collection[0:batch_stride] = []
+                tracklet_pose_collection_second[0:batch_stride] = []
         else: # 最后一个batch，之后的batch不足
             if len(tracklet_pose_collection) < tracklet_len + (total_frames - batch_id*batch_stride-1):
                 continue
             else:
                 tracklet_pose_collection[0:batch_stride] = []
+                tracklet_pose_collection_second[0:batch_stride] = []
                 tracklet_len = len(tracklet_pose_collection)
 
     # eval_results = evaluate_prediction(dataloader,data_list)
@@ -3125,186 +3444,8 @@ def detect(opt,exp,args):
             # curr_tracklet_input_people: shape number of people in current batch of frames x 3 x 256 x 128
             # mapping_frameid_bbox_to_features: dict or lut(look up table can be implemented with C++) maps a string (frameid+'[(left, top), (right, bottom)]') to the idx of the bbox in current batch of frames, idx is integer
             # shape: number of people in current batch of frames x 2, 2 denotes horizontal and vertical coordinates of the center of each person, float
-            curr_tracklet_input_people, mapping_frameid_bbox_to_features, curr_tracklet_input_people_center_coords = convert_list_dict_to_np(tracklet_pose_collection, 256, 128)# 近10帧
-            # curr_tracklet_input_people (79,3,256,128)
-            # mapping_frameid_bbox_to_features: dict:79
-            # curr_tracklet_input_people_center_coords:(79,2),对应节点的中心坐标
-            reid_middle_time = time.time()
-            #print('reid second half time: ' + str(reid_middle_time - reid_start_time))
-            location_weight = 0
-            # the conversion can be removed
-            # output features with shape: number of people in current batch x 512
-            # you don't need to implement this function for extracting features
-
-            # if tracklet_inner_cnt + 1 > tracklet_len:
-            #     curr_tracklet_input_people_tmp = copy.deepcopy(curr_tracklet_input_people)
-            #     curr_tracklet_input_people = curr_tracklet_input_people[[[y for y in mapping_frameid_bbox_to_features].index(x) for x in mapping_frameid_bbox_to_features if (x not in mapping_frameid_bbox_to_features_last)], :, :, :]
-            gc.collect()
-            torch.cuda.empty_cache()
-            # print(torch.cuda.memory_summary(device=0, abbreviated=False))
-            with torch.no_grad():
-                features = similarity_module(torch.from_numpy(curr_tracklet_input_people.astype('float32')).cuda()).data.cpu()
-            # 计算所有input people的特征向量
-            # Tensor(79,512)
-
-            # if tracklet_inner_cnt + 1 > tracklet_len:
-            #     curr_tracklet_input_people = curr_tracklet_input_people_tmp
-            #     features = torch.cat([features_last, features], dim=0) # np.concatenate((features_last, features), axis = 0)
-            #     features = features[-len(mapping_frameid_bbox_to_features):, :]
-
-            reid_end_time = time.time()
-            # mapping_frameid_bbox_to_features 的值替换为bbox的特征
-            for mapping_frameid_bbox_to_features_key in mapping_frameid_bbox_to_features.keys():
-                mapping_frameid_bbox_to_features[mapping_frameid_bbox_to_features_key] = features.data.numpy()[mapping_frameid_bbox_to_features[mapping_frameid_bbox_to_features_key], :].tolist()
-
-            # curr_tracklet_input_people_last, mapping_frameid_bbox_to_features_last, curr_tracklet_input_people_center_coords_last, features_last = \
-            #     copy.deepcopy(curr_tracklet_input_people), copy.deepcopy(mapping_frameid_bbox_to_features), copy.deepcopy(curr_tracklet_input_people_center_coords), copy.deepcopy(features)
-
-            if dump_switch == 1:
-                if not os.path.exists(os.path.join(dump_curr_video_name)):
-                    os.mkdir(os.path.join(dump_curr_video_name))
-                    # np.save(os.path.join(dump_curr_video_name, 'features: frame' + str(tracklet_inner_cnt + 1 - tracklet_len) + 'to' + str(tracklet_inner_cnt) + '.npy'), features)
-                out_file = os.path.join(dump_curr_video_name, 'tracklet_pose_collection_frame' + str(tracklet_inner_cnt + 1 - tracklet_len) + 'to' + str(tracklet_inner_cnt) + '.json')
-                json.dump(tracklet_pose_collection[tracklet_inner_cnt + 1 - tracklet_len: tracklet_inner_cnt + 1], codecs.open(out_file, 'w', encoding='utf-8'), separators=(',', ':'), sort_keys=True)
-                out_file = os.path.join(dump_curr_video_name, 'features_frame' + str(tracklet_inner_cnt + 1 - tracklet_len) + 'to' + str(tracklet_inner_cnt) + '.json')
-                json.dump(features.tolist(), codecs.open(out_file, 'w', encoding='utf-8'), separators=(',', ':'), sort_keys=True)
-                out_file = os.path.join(dump_curr_video_name, 'mapping_frameid_bbox_to_features_frame' + str(tracklet_inner_cnt + 1 - tracklet_len) + 'to' + str(tracklet_inner_cnt) + '.json')
-                json.dump(mapping_frameid_bbox_to_features, codecs.open(out_file, 'w', encoding='utf-8'), separators=(',', ':'), sort_keys=True)
-
-
-            #print('reid second half time: ' + str(reid_end_time - reid_middle_time))
-            ############################################################################################################################################
-            mapping_node_id_to_bbox = {} # dict:79 包含每个node的bbox位置置信度以及帧名
-            mapping_node_id_to_features = {} #　dict: key=str(imgname,bbox) value=feature
-            mapping_edge_id_to_cost = {} #　每个id与下一帧每个id的损失　
-            mapping_node_id_to_keypoint = {}
-            node_id_cnt = 1 #
-            # time_start = time.time()
-
-            ###################################################################### multiprocessing for computing matching error between people
-            # error_computing_start_time = time.time()
-            # number of frame-to-frame pairs for matching
-            num_of_person_to_person_matching_matrix_normalized_copies = 0
-            # for multi-process, the matching between each pair of frames produces a matrix with number of rows equal to the number of people in the former frame and
-            # number of cols equal to the number of people in the latter frame, this variable stores the maximum number of rows throughout all frame pairs
-            max_row_num_of_person_to_person_matching_matrix_normalized = 0 #所有当前帧中最大值
-            # for multi-process, the matching between each pair of frames produces a matrix with number of rows equal to the number of people in the former frame and
-            # number of cols equal to the number of people in the latter frame, this variable stores the maximum number of cols throughout all frame pairs
-            max_col_num_of_person_to_person_matching_matrix_normalized = 0 #所有下一帧中最大值
-            tracklet_inner_idx_list = []
-            node_id_cnt_list = []
-            parallel_tasks_args_list = []
-            for tracklet_inner_idx in range(0, tracklet_len):
-                curr_frame_dict = tracklet_pose_collection[tracklet_inner_idx]  # 当前处理帧
-                for idx_stride_between_frame_pair in range(1, 3): # 配对帧之间步长最多为2
-                    if tracklet_inner_idx + idx_stride_between_frame_pair >= len(tracklet_pose_collection): # 保证仍然在该batch内
-                        continue
-                    ##### here input tracklet_pose_collection may consume to much memory
-                    # each element of parallel_tasks_args_list corresponds to one frame pair, one element consists of: frame idx of the former frame, starting frame idx of current batch of frames,
-                    # current node idx (each node represents one person in a certain frame), collection of all human bounding boxes in current batch, stride between former and latter frames, an extremely large number
-                    parallel_tasks_args_list.append([tracklet_inner_idx, tracklet_inner_cnt - tracklet_len + 1, node_id_cnt, tracklet_pose_collection, idx_stride_between_frame_pair, maximum_possible_number]) # 当前batch起始帧位置
-                    next_frame_dict = tracklet_pose_collection[tracklet_inner_idx + idx_stride_between_frame_pair]
-                    num_of_person_to_person_matching_matrix_normalized_copies += 1
-                    max_row_num_of_person_to_person_matching_matrix_normalized = max([max_row_num_of_person_to_person_matching_matrix_normalized, len(curr_frame_dict['bbox_list'])])
-                    max_col_num_of_person_to_person_matching_matrix_normalized = max([max_col_num_of_person_to_person_matching_matrix_normalized, len(next_frame_dict['bbox_list'])])
-                node_id_cnt += len(curr_frame_dict['bbox_list'])
-
-            # The matching matrix storing the matching relations between all pairs of frames
-            person_to_person_matching_matrix_normalized_collection = np.zeros((max_row_num_of_person_to_person_matching_matrix_normalized, max_col_num_of_person_to_person_matching_matrix_normalized, num_of_person_to_person_matching_matrix_normalized_copies))
-            result_person_to_person_matching_matrix_normalized_collection = copy.deepcopy(person_to_person_matching_matrix_normalized_collection)
-            # person_to_person_matching_matrix_normalized_collection = multiprocessing.RawArray('d', person_to_person_matching_matrix_normalized_collection.ravel())
-            for parallel_tasks_args_list_item in parallel_tasks_args_list:
-                tracklet_inner_idx_list.append(parallel_tasks_args_list_item[0])
-                node_id_cnt_list.append(parallel_tasks_args_list_item[2])
-                parallel_tasks_args_list[parallel_tasks_args_list.index(parallel_tasks_args_list_item)] = parallel_tasks_args_list_item + [max_row_num_of_person_to_person_matching_matrix_normalized, max_col_num_of_person_to_person_matching_matrix_normalized, num_of_person_to_person_matching_matrix_normalized_copies, node_id_cnt_list, features]
-            # with multiprocessing.Pool(processes=8) as pool:
-            whether_use_iou_similarity_or_not = True # (GetFaceSmdScore(im0s) > 0.7) # 如果清晰度大于阈值则使用iou_similarity
-
-            for parallel_tasks_args_list_item in parallel_tasks_args_list:
-                person_to_person_matching_matrix_normalized, idx_stride_between_frame_pair, node_id_cnt = compute_inter_person_similarity_worker(parallel_tasks_args_list_item, whether_use_iou_similarity_or_not)
-                # collect the results from multiprocessing and store the matching error between each pair of frames into result_person_to_person_matching_matrix_normalized_collection
-                result_person_to_person_matching_matrix_normalized_collection[0:person_to_person_matching_matrix_normalized.shape[0], \
-                                                                              0:person_to_person_matching_matrix_normalized.shape[1], \
-                                                                              [parallel_tasks_args_list.index(x) for x in parallel_tasks_args_list if (x[2]==node_id_cnt and x[4]==idx_stride_between_frame_pair)][0]] = person_to_person_matching_matrix_normalized
-            if dump_further_switch == 1:
-                if not os.path.exists(os.path.join(dump_curr_video_name)):
-                    os.mkdir(os.path.join(dump_curr_video_name))
-                # '/usr/local/SSP_EM/tracking_for_integration/node_id_cnt_list_frame0to9.json'
-                out_file = os.path.join(dump_curr_video_name, 'node_id_cnt_list_frame' + str(tracklet_inner_cnt + 1 - tracklet_len) + 'to' + str(tracklet_inner_cnt) + '.json')
-                json.dump(node_id_cnt_list, codecs.open(out_file, 'w', encoding='utf-8'), separators=(',', ':'), sort_keys=True)
-                parallel_tasks_args_list_for_dump = copy.deepcopy(parallel_tasks_args_list)
-                for parallel_tasks_args_list_for_dump_idx in range(len(parallel_tasks_args_list_for_dump)):
-                    parallel_tasks_args_list_for_dump[parallel_tasks_args_list_for_dump_idx][-1] = parallel_tasks_args_list_for_dump[parallel_tasks_args_list_for_dump_idx][-1].data.numpy().tolist() # Tensor转化
-                out_file = os.path.join(dump_curr_video_name, 'parallel_tasks_args_list_frame' + str(tracklet_inner_cnt + 1 - tracklet_len) + 'to' + str(tracklet_inner_cnt) + '.json')
-                json.dump(parallel_tasks_args_list_for_dump, codecs.open(out_file, 'w', encoding='utf-8'), separators=(',', ':'), sort_keys=True)
-            # if dump_switch == 1:
-            #     out_file = os.path.join(dump_curr_video_name, 'result_person_to_person_matching_matrix_normalized_collection_frame' + str(tracklet_inner_cnt + 1 - tracklet_len) + 'to' + str(tracklet_inner_cnt) + '.json')
-            #     json.dump(result_person_to_person_matching_matrix_normalized_collection.tolist(), codecs.open(out_file, 'w', encoding='utf-8'), separators=(',', ':'), sort_keys=True)
-
-            # The tracking algorithm organizes detections in the form of nodes, each node corresponds to the index of one object in a batch of frames, this part of preprocessing computes the edges between nodes, each edge measures the matching error between its two ending nodes.
-            # node id starts from 1
-            node_id_cnt = 1
-            for tracklet_inner_idx in range(0, tracklet_len):
-                # tracklet_pose_collection is a dict, each key is an integer of frame id, the value corresponding to the key is a dict with following keys:
-                # 'bbox_list': a list of bboxes in the frame, each bbox with floating data [(left coordinate, top coordinate), (right coordinate, bottom coordinate)], body bboxes
-                # 'head_bbox_list': a list of bboxes in the frame, each bbox with floating data [(left coordinate, top coordinate), (right coordinate, bottom coordinate)], head bboxes
-                # 'box_confidence_scores': a list of confidences of bboxes, each element is a floating number within range [0, 1]
-                # 'target_body_box_coord': a list with two elements, in the format of floating [(left coordinate, top coordinate), (right coordinate, bottom coordinate)], describe the bbox of the target person
-                # 'img_dir': a string describing the location for storing the frame, ending with '.jpg'
-                curr_frame_dict = tracklet_pose_collection[tracklet_inner_idx]
-                # matching is conducted between (frame t, frame t+1) and (frame t, frame t+2), that is (frame t, frame t+idx_stride_between_frame_pair) with idx_stride_between_frame_pair=1, 2
-                for idx_stride_between_frame_pair in range(1, 3):
-                    # if frame t and frame t+idx_stride_between_frame_pair all have detections
-                    if tracklet_inner_idx + idx_stride_between_frame_pair < len(tracklet_pose_collection):
-                        next_frame_dict = tracklet_pose_collection[tracklet_inner_idx + idx_stride_between_frame_pair]
-                        ############################################################# matching ######################################################
-                        # introduction
-                        # Now begin to obtain a matrix describing the matching error between people in two frames, each row corresponds to one person in current frame, each column corresponds to one person in next frame
-                        # each element of parallel_tasks_args_list corresponds to one frame pair, one element consists of: frame idx of the former frame, starting frame idx of current batch of frames,
-                        # starting node idx in former frame in a frame pair (each node represents one person in a certain frame), collection of all human bounding boxes in current batch, stride between former and latter frames, an extremely large number,
-                        # maximum number of people in former frames from all frame pairs, maximum number of people in latter frames from all frame pairs, number of frame pairs for matching in current batch of frames,
-                        # an integer list of starting node ids in former frame from all frame pairs, a floating array with shape num_people_in_current_batch_of_frames x 512 describing the reid features of all humans in current batch of frames
-                        # input
-                        # 0:len(curr_frame_dict['bbox_list']) - from 0 to the number of people in the former frame in frame pair
-                        # 0:len(next_frame_dict['bbox_list']) - from 0 to the number of people in the latter frame in frame pair
-                        # [parallel_tasks_args_list.index(x) for x in parallel_tasks_args_list if (x[2]==node_id_cnt and x[4]==idx_stride_between_frame_pair)][0] - the channel idx of the matrix describing matching relations between current frame pair in result_person_to_person_matching_matrix_normalized_collection
-                        # output
-                        # a floating matrix person_to_person_matching_matrix_normalized describing the matching relations between current batch of frames
-                        person_to_person_matching_matrix_normalized = result_person_to_person_matching_matrix_normalized_collection[0:len(curr_frame_dict['bbox_list']), 0:len(next_frame_dict['bbox_list']), [parallel_tasks_args_list.index(x) for x in parallel_tasks_args_list if (x[2]==node_id_cnt and x[4]==idx_stride_between_frame_pair)][0]]
-                        ########################################################## begin to prepare data for tracker ###################################################################
-                        time_start_prepare_costs = time.time()
-                        # input
-                        # idx_stride_between_frame_pair: temporal stride between current frame pair
-                        # curr_frame_dict: a dict storing 'bbox_list', 'head_bbox_list', 'box_confidence_scores', 'target_body_box_coord' and 'img_dir' of former frame in current frame pair
-                        # tracklet_pose_collection: dicts of all frames
-                        # next_frame_dict: a dict storing 'bbox_list', 'head_bbox_list', 'box_confidence_scores', 'target_body_box_coord' and 'img_dir' of latter frame in current frame pair
-                        # person_to_person_matching_matrix_normalized: output of the last function
-                        # node_id_cnt: starting node id of nodes in former frame in current frame pair
-                        # tracklet_inner_idx: frame id of the former frame
-                        # mapping_node_id_to_bbox: an empty dict
-                        # mapping_node_id_to_features: an empty dict
-                        # mapping_edge_id_to_cost: an empty dict
-                        # mapping_frameid_bbox_to_features: a dict mapping string 'frameid_bbox coordinates' to a 512-D feature vector, the string 'frameid_bbox coordinates' has length 36, an example is '0930[(467.0, 313.0), (508.0, 424.0)]' where 0930 is frame id, the coordinates are in the format [(left, top), (right, bottom)]
-                        mapping_node_id_to_bbox, mapping_node_id_to_features, mapping_edge_id_to_cost = prepare_costs_for_tracking_alg(idx_stride_between_frame_pair, curr_frame_dict, tracklet_pose_collection, next_frame_dict, person_to_person_matching_matrix_normalized, node_id_cnt, tracklet_inner_idx, mapping_node_id_to_bbox, mapping_node_id_to_features, mapping_edge_id_to_cost, mapping_frameid_bbox_to_features)
-                        time_end_prepare_costs = time.time()
-
-                node_id_cnt += len(curr_frame_dict['bbox_list'])
-            # time_end = time.time()
-            # error_computing_end_time = time.time()
-            #print('error computing time: ' + str(error_computing_end_time - error_computing_start_time))
-            max_in_mapping_edge_id_to_cost = max([mapping_edge_id_to_cost[x] for x in mapping_edge_id_to_cost]) + 1e-6
-            if max_in_mapping_edge_id_to_cost >= 0:
-                for mapping_edge_id_to_cost_key in mapping_edge_id_to_cost:
-                    mapping_edge_id_to_cost[mapping_edge_id_to_cost_key] = mapping_edge_id_to_cost[mapping_edge_id_to_cost_key] - max_in_mapping_edge_id_to_cost
-            if dump_further_switch == 1:
-                if not os.path.exists(os.path.join(dump_curr_video_name)):
-                    os.mkdir(os.path.join(dump_curr_video_name))
-                out_file = os.path.join(dump_curr_video_name, 'input_to_track_mapping_node_id_to_bbox_frame' + str(tracklet_inner_cnt + 1 - tracklet_len) + 'to' + str(tracklet_inner_cnt) + '.json')
-                json.dump(mapping_node_id_to_bbox, codecs.open(out_file, 'w', encoding='utf-8'), separators=(',', ':'), sort_keys=True)
-                out_file = os.path.join(dump_curr_video_name, 'input_to_track_mapping_node_id_to_features_frame' + str(tracklet_inner_cnt + 1 - tracklet_len) + 'to' + str(tracklet_inner_cnt) + '.json')
-                json.dump(mapping_node_id_to_features, codecs.open(out_file, 'w', encoding='utf-8'), separators=(',', ':'), sort_keys=True)
-                out_file = os.path.join(dump_curr_video_name, 'input_to_track_mapping_edge_id_to_cost_frame' + str(tracklet_inner_cnt + 1 - tracklet_len) + 'to' + str(tracklet_inner_cnt) + '.json')
-                json.dump(mapping_edge_id_to_cost, codecs.open(out_file, 'w', encoding='utf-8'), separators=(',', ':'), sort_keys=True)
+            mapping_node_id_to_bbox,mapping_edge_id_to_cost,mapping_node_id_to_features = mapping_data_preparation(tracklet_pose_collection, similarity_module, tracklet_inner_cnt,True)
+            ### 需要对第二次ssp当中的tracklet_pose_collection_second进行修正 ###
             ##################################################################################################################################
             ############################ organize graph and call #############################################################################
             # time_start = time.time()
@@ -3313,20 +3454,53 @@ def detect(opt,exp,args):
                 break
             # time_start = time.time()
             result = tracking(mapping_node_id_to_bbox, mapping_edge_id_to_cost, tracklet_inner_cnt) # tracking函数为ssp算法实现
+            
             time_end = time.time()
             # print('SSP computing time: ' + str(time_end - time_start))
-            split_each_track_SSP, valid_mask  = update_split_each_track_valid_mask(result)
-            # current_video_segment_predicted_tracks_SSP = {}
-            # current_video_segment_predicted_tracks_confidence_score_SSP = {}
+            indefinite_node = [] # 表示第一次ssp当中不确定的点
+            error_tracks = [] # 第一次ssp当中出错的轨迹段
+            split_each_track_SSP, split_each_track_valid_mask  = update_split_each_track_valid_mask(result)
+            current_video_segment_predicted_tracks_bboxes_test_SSP,trajectory_node_dict,trajectory_idswitch_dict,trajectory_idswitch_reliability_dict,trajectory_segment_nodes_dict = track_processing(split_each_track_SSP, mapping_node_id_to_bbox, mapping_node_id_to_features,split_each_track_valid_mask)
+            n_clusters = 0 # 最大轨迹数目，第二次低置信度点不增加轨迹数目只改变ssp结果
+            for track_id in trajectory_idswitch_reliability_dict:
+                if len(trajectory_idswitch_reliability_dict[track_id]) > 1:
+                    for i in range(len(trajectory_idswitch_reliability_dict[track_id])):
+                        if trajectory_idswitch_reliability_dict[track_id][i] < 2:
+                            continue
+                        segment_nodes = trajectory_segment_nodes_dict[track_id][i]
+                        mean_conf = np.mean([mapping_node_id_to_bbox[node][1] for node in segment_nodes])
+                        # if mean_conf > 0.8:
+                        n_clusters += 1
+                        indefinite_node += segment_nodes
+                        error_tracks.append(track_id)
+                elif len(trajectory_idswitch_reliability_dict[track_id]) == 1 and len(current_video_segment_predicted_tracks_bboxes_test_SSP[track_id])< tracklet_len:
+                    indefinite_node += trajectory_node_dict[track_id]
+                    n_clusters += 1
+                    error_tracks.append(track_id)
+
+            unique_frame_list = sorted(np.unique([mapping_node_id_to_bbox[x][2] for x in mapping_node_id_to_bbox]))
+            #### 把indefinite_node 当中的节点加入到 tracklet_pose_collection_second当中 ####
+            for node in indefinite_node:
+                bbox,conf,frame = mapping_node_id_to_bbox[node][0],mapping_node_id_to_bbox[node][1],mapping_node_id_to_bbox[node][2]
+                tracklet_pose_collection_second[unique_frame_list.index(frame)]['bbox_list'].append(bbox)
+                tracklet_pose_collection_second[unique_frame_list.index(frame)]['box_confidence_scores'].append(conf)
+            ##### second ssp #####
+            mapping_node_id_to_bbox_second,mapping_edge_id_to_cost_second,mapping_node_id_to_features_second = mapping_data_preparation(tracklet_pose_collection_second, similarity_module, tracklet_inner_cnt,False)
+
+            result_second = tracking(mapping_node_id_to_bbox_second, mapping_edge_id_to_cost_second, tracklet_inner_cnt)
+            ## 进行轨迹合并 ##
+            # result = tracks_combination(error_tracks,result_second,mapping_node_id_to_bbox_second, mapping_node_id_to_features_second, source,tracklet_len,n_clusters)
+                        
+            split_each_track_SSP_second,split_each_track_valid_mask_second= update_split_each_track_valid_mask(result_second)
+            current_video_segment_predicted_tracks_bboxes_test_SSP_second,trajectory_node_dict_second,trajectory_idswitch_dict_second,trajectory_idswitch_reliability_dict_second,trajectory_segment_nodes_dict_second = track_processing(split_each_track_SSP_second, mapping_node_id_to_bbox_second, mapping_node_id_to_features_second,split_each_track_valid_mask_second)
             current_video_segment_predicted_tracks_SSP, current_video_segment_predicted_tracks_confidence_score_SSP, current_video_segment_predicted_tracks_bboxes_SSP, current_video_segment_representative_frames_SSP,current_video_segment_predicted_tracks_bboxes_test_SSP,trajectory_similarity_dict_SSP,current_video_segment_all_traj_all_object_features_SSP= convert_track_to_stitch_format(split_each_track_SSP,mapping_node_id_to_bbox,mapping_node_id_to_features)
             # print(str(tracklet_inner_cnt) + ' ' + result[0].split('Predicted tracks')[1])
             # split_each_track, _ = update_split_each_track_valid_mask(result)
             # result =
             # _trajs(result, mapping_edge_id_to_cost, mapping_node_id_to_bbox, mapping_node_id_to_features)
-
-            unique_frame_list = sorted(np.unique([mapping_node_id_to_bbox[x][2] for x in mapping_node_id_to_bbox]))
             ##### 修正之前纯SSP算法结果 #####
             ##### 当前batch的txt写入  ########
+            #### high confidence score ####
             for frame_name in unique_frame_list:
                 curr_img = cv2.imread(os.path.join(source, frame_name))
                 # curr_img = cv2.imread('/media/allenyljiang/Seagate_Backup_Plus_Drive/usr/local/VIBE-master/data/neurocomputing/05_0019/' + frame_name)
@@ -3344,24 +3518,30 @@ def detect(opt,exp,args):
                     #os.mkdir(os.path.join(source.split(source.split('/')[-1])[0], 'results', source.split('/')[-1] + '_vis/'))
                     os.makedirs(os.path.join(source.split(source.split('/')[-1])[0], 'results_all', source.split('/')[-1] + '_vis_ssp/'))
                 cv2.imwrite(os.path.join(source.split(source.split('/')[-1])[0], 'results_all', source.split('/')[-1] + '_vis_ssp/') + str(tracklet_inner_cnt) + '_' + frame_name, curr_img)
+            ##### 低置信度框 ###
+            for frame_name in unique_frame_list:
+                curr_img = cv2.imread(os.path.join(source, frame_name))
+                # curr_img = cv2.imread('/media/allenyljiang/Seagate_Backup_Plus_Drive/usr/local/VIBE-master/data/neurocomputing/05_0019/' + frame_name)
+                for human_id in split_each_track_SSP_second: # 当前轨迹id
+                    for node_idx in [x for x in range(len(split_each_track_SSP_second[human_id])) if (x % 2 == 0)]: #偶数表示人的节点 id
+                        if mapping_node_id_to_bbox_second[int(int(split_each_track_SSP_second[human_id][node_idx][1]) / 2)][2] == frame_name: #  写入帧数，轨迹数，坐标
+                            # curr_batch_txt.write(str(unique_frame_list.index(frame_name) + 1) + ',' + str(human_id) + ',' + \
+                            #                      str(mapping_node_id_to_bbox_second[int(int(split_each_track_SSP_second[human_id][node_idx][1]) / 2)][0][0][0]) + ',' + \
+                            #                      str(mapping_node_id_to_bbox_second[int(int(split_each_track_SSP_second[human_id][node_idx][1]) / 2)][0][0][1]) + ',' + \
+                            #                      str(mapping_node_id_to_bbox_second[int(int(split_each_track_SSP_second[human_id][node_idx][1]) / 2)][0][1][0]) + ',' + \
+                            #                      str(mapping_node_id_to_bbox_second[int(int(split_each_track_SSP_second[human_id][node_idx][1]) / 2)][0][1][1]) + ',-1,-1,-1,-1\n') # mot格式：必须10个数
+                            left, top = int(mapping_node_id_to_bbox_second[int(int(split_each_track_SSP_second[human_id][node_idx][1]) / 2)][0][0][0]), int(mapping_node_id_to_bbox_second[int(int(split_each_track_SSP_second[human_id][node_idx][1]) / 2)][0][0][1])
+                            cv2.putText(curr_img, str(human_id), (left, top), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 255, 0), 3)
+                if not os.path.exists(os.path.join(source.split(source.split('/')[-1])[0], 'results_all', source.split('/')[-1] + '_vis_ssp_second/')):
+                    #os.mkdir(os.path.join(source.split(source.split('/')[-1])[0], 'results', source.split('/')[-1] + '_vis/'))
+                    os.makedirs(os.path.join(source.split(source.split('/')[-1])[0], 'results_all', source.split('/')[-1] + '_vis_ssp_second/'))
+                cv2.imwrite(os.path.join(source.split(source.split('/')[-1])[0], 'results_all', source.split('/')[-1] + '_vis_ssp_second/') + str(tracklet_inner_cnt) + '_' + frame_name, curr_img)
                 # cv2.imwrite('/media/allenyljiang/Seagate_Backup_Plus_Drive/usr/local/VIBE-master/data/neurocomputing/results/mot20_test2/05_0019_vis/' + str(tracklet_inner_cnt) + '_' + frame_name, curr_img)
             ### data prepare for second match ###
-            mapping_node_id_to_bbox_second = {}
-            initial_id = max(list(mapping_node_id_to_bbox.keys()))
-            for frame_collection in tracklet_pose_collection_second:
-                bbox_list = frame_collection['bbox_list']
-                box_confidence_list = frame_collection['box_confidence_scores']
-                path = frame_collection['img_dir']
-                for id,box in enumerate(bbox_list):
-                    initial_id += 1
-                    mapping_node_id_to_bbox_second[initial_id] = []
-                    mapping_node_id_to_bbox_second[initial_id].append(bbox_list[id])
-                    mapping_node_id_to_bbox_second[initial_id].append(box_confidence_list[id])
-                    mapping_node_id_to_bbox_second[initial_id].append(path.split('/')[-1])
-
             time_start = time.time()
             # result = BO_fix_Thompson_sampling(result, mapping_edge_id_to_cost, mapping_node_id_to_bbox, mapping_node_id_to_features, device, source,tracklet_len)# BO进行结果修复
-            result = cluster_fix(result, mapping_edge_id_to_cost, mapping_node_id_to_bbox,mapping_node_id_to_bbox_second, mapping_node_id_to_features, device, source,tracklet_len)# BO进行结果修复
+            # cluster_fix(result, result_second,mapping_edge_id_to_cost, mapping_node_id_to_bbox, mapping_node_id_to_bbox_second,mapping_node_id_to_features, mapping_node_id_to_features_second, device, source,tracklet_len):
+            # result = cluster_fix(result,result_second, mapping_edge_id_to_cost, mapping_node_id_to_bbox,mapping_node_id_to_bbox_second, mapping_node_id_to_features, mapping_node_id_to_features_second,device, source,tracklet_len)# BO进行结果修复
             time_end = time.time()
             print('cluster fix time = {}'.format(str(int(time_end)-int(time_start))))
             # time_start = time.time()

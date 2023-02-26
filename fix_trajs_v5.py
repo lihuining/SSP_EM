@@ -561,7 +561,313 @@ def compute_overlap_single_box(curr_img_boxes, next_img_boxes):# Order: top, bot
         corresponding_coefficient = 0.0
     return corresponding_coefficient
 
-def cluster_fix(result, mapping_edge_id_to_cost, mapping_node_id_to_bbox, mapping_node_id_to_bbox_second,mapping_node_id_to_features, device, source,tracklet_len):
+def tracks_combination(error_tracks,result,result_second,mapping_node_id_to_bbox, mapping_node_id_to_bbox_second,mapping_node_id_to_features,mapping_node_id_to_features_second,source,tracklet_len,n_clusters):
+    '''
+    进行第二次ssp结果与第一次ssp结果的合并
+    n_clusters:最多可能的轨迹数目
+    error_tracks: high detection ssp track with error
+    '''
+    global batch_id
+    # global tracklet_len
+    # initialize parameters for BO
+    # split_each_track:每条轨迹所包含的节点连接顺序，split_each_track_valid_mask:不正确的点标注为-1,不正确的边标注为0,正确结果标注为１
+    split_each_track, split_each_track_valid_mask = update_split_each_track_valid_mask(result)
+    split_each_track_second, split_each_track_valid_mask_second = update_split_each_track_valid_mask(result_second)
+    # 使用SSP的轨迹结果
+    # trajectory_idswitch_dict 对应于在node_list当中的索引
+    ##  high confidence results ##
+    current_video_segment_predicted_tracks_bboxes_test_SSP,_,_,_,_ = convert_track_to_stitch_format(split_each_track, mapping_node_id_to_bbox, mapping_node_id_to_features,split_each_track_valid_mask)
+    ## low confidence results ##
+    cluster_tracks,trajectory_node_dict,trajectory_idswitch_dict,trajectory_idswitch_reliability_dict,trajectory_segment_nodes_dict = convert_track_to_stitch_format(split_each_track_second, mapping_node_id_to_bbox_second, mapping_node_id_to_features_second,split_each_track_valid_mask_second)
+    ## 取出low-confidence当中有用的点 ##
+    indefinite_node_list = []
+    definite_node_list = []
+    indefinite_node = []
+    for track_id in trajectory_idswitch_reliability_dict:
+        # for low confidence track, only idswitch track need revise
+        if len(trajectory_idswitch_reliability_dict[track_id]) > 1:
+            for i in range(len(trajectory_idswitch_reliability_dict[track_id])):
+                if trajectory_idswitch_reliability_dict[track_id][i] < 2: # 不考虑小于2的tracklet
+                    continue
+                segment_nodes = trajectory_segment_nodes_dict[track_id][i]
+                mean_conf = np.mean([mapping_node_id_to_bbox[node][1] for node in segment_nodes])
+                max_conf = np.max([mapping_node_id_to_bbox[node][1] for node in segment_nodes])
+                if max_conf > 0.6:
+                    n_clusters += 1
+                    indefinite_node += segment_nodes
+                    indefinite_node_list.append(segment_nodes)
+
+
+    def my_distance(point1, point2):
+        dimension = len(point1)
+        result = 0.0
+        for i in range(dimension - 1):
+            result += abs(point1[i] - point2[i]) ** 2
+        eps = 0.01
+        if point1[dimension - 1] == point2[dimension - 1]:
+            result += 1 / eps
+        return result
+    # source = '/home/allenyljiang/Documents/Dataset/MOT20/train/MOT20-01/img1'
+    def getDictKey_1(myDict, value):
+        return [k for k, v in myDict.items() if value in list(v.keys())][0]
+    def show_clusters(cluster_tracks):
+        cluster_frame_list = sorted(np.unique([mapping_node_id_to_bbox[x][2] for x in indefinite_node]))
+        for frame_name in cluster_frame_list:
+            curr_img = cv2.imread(os.path.join(source, frame_name))
+            for bboxid in indefinite_node:
+                if mapping_node_id_to_bbox[bboxid][2] == frame_name:
+                    left, top = int(mapping_node_id_to_bbox[bboxid][0][0][0]), int(
+                        mapping_node_id_to_bbox[bboxid][0][0][1])
+                    right, bottom = int(mapping_node_id_to_bbox[bboxid][0][1][0]), int(
+                        mapping_node_id_to_bbox[bboxid][0][1][1])
+                    # cv2.putText(curr_img, str(getDictKey_1(cluster_tracks,bboxid)), (int((left+right)/2), int((top+bottom)/2)), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 255), 3)
+                    cv2.putText(curr_img, str(getDictKey_1(cluster_tracks, bboxid)), (left, top),
+                                cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 255), 3)
+                    cv2.putText(curr_img,str(round(mapping_node_id_to_bbox[bboxid][1],2)), (right, bottom),
+                                cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 3) # 字体大小为1
+                    cv2.rectangle(curr_img, (left, top), (right, bottom), (0, 255, 0), 3)
+            if not os.path.exists(os.path.join(source.split(source.split('/')[-1])[0], 'results_all',
+                                               source.split('/')[-1] + '_cluster_results/')):
+                os.makedirs(os.path.join(source.split(source.split('/')[-1])[0], 'results_all',
+                                         source.split('/')[-1] + '_cluster_results/'))
+            cv2.imwrite(os.path.join(source.split(source.split('/')[-1])[0], 'results_all',
+                                     source.split('/')[-1] + '_cluster_results/') + frame_name, curr_img)
+    def show_fix_clusters(tracks): # 显示clusters处理之后的结果
+        cluster_frame_list = sorted(np.unique([mapping_node_id_to_bbox[x][2] for x in mapping_node_id_to_bbox]))
+        for frame_name in cluster_frame_list:
+            curr_img = cv2.imread(os.path.join(source, frame_name))
+            for track_id in tracks:
+                for bboxid in tracks[track_id]:
+                    if mapping_node_id_to_bbox[bboxid][2] == frame_name:
+                        left, top = int(mapping_node_id_to_bbox[bboxid][0][0][0]), int(
+                            mapping_node_id_to_bbox[bboxid][0][0][1])
+                        right, bottom = int(mapping_node_id_to_bbox[bboxid][0][1][0]), int(
+                            mapping_node_id_to_bbox[bboxid][0][1][1])
+                        # cv2.putText(curr_img, str(getDictKey_1(cluster_tracks,bboxid)), (int((left+right)/2), int((top+bottom)/2)), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 255), 3)
+                        cv2.putText(curr_img, str(track_id), (left, top),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 255), 3)
+                        cv2.rectangle(curr_img, (left, top), (right, bottom), (0, 255, 0), 3)
+            if not os.path.exists(os.path.join(source.split(source.split('/')[-1])[0], 'results_all',
+                                               source.split('/')[-1] + '_fixed_clusters/')):
+                os.makedirs(os.path.join(source.split(source.split('/')[-1])[0], 'results_all',
+                                         source.split('/')[-1] + '_fixed_clusters/'))
+            cv2.imwrite(os.path.join(source.split(source.split('/')[-1])[0], 'results_all',
+                                     source.split('/')[-1] + '_fixed_clusters/') + frame_name, curr_img)
+        return tracks
+
+    # kmeans_visualizer.show_clusters(sample, clusters, final_centers)
+    show_clusters(cluster_tracks)
+
+    definite_track_list = set(split_each_track.keys()) - set(cluster_tracks.keys())
+    cluster_all_keys = set(cluster_tracks.keys())
+    ######## 在此之前cluster_tracks当中的key没有变化，但是之后会发生变化 #######
+    frame_list = sorted(np.unique([mapping_node_id_to_bbox[x][2] for x in mapping_node_id_to_bbox]))
+    frame_start,frame_end = int(frame_list[0].split('.')[0]),int(frame_list[-1].split('.')[0])
+    frame_span = list(range(frame_start,frame_end+1)) # int类型表示frame
+    ##### 处理掉 K-means当中重复的帧 #####
+    for track1 in cluster_tracks:
+        frame_cnt_dict = {} # 统计当前track当中每帧出现的次数
+        frame_node_dict = {} # 每帧当中出现的node,帧使用整数表示
+        for node in cluster_tracks[track1]:
+            if int(mapping_node_id_to_bbox[node][2].split('.')[0]) not in frame_cnt_dict:
+                frame_cnt_dict[int(mapping_node_id_to_bbox[node][2].split('.')[0])] = 1
+                frame_node_dict[int(mapping_node_id_to_bbox[node][2].split('.')[0])] = [node]
+            else:
+                frame_cnt_dict[int(mapping_node_id_to_bbox[node][2].split('.')[0])] += 1
+                frame_node_dict[int(mapping_node_id_to_bbox[node][2].split('.')[0])].append(node)
+        # 找出存在冲突的帧
+        if max(list(frame_cnt_dict.values())) < 2:
+            continue
+        else:
+            for frame in frame_cnt_dict:
+                if frame_cnt_dict[frame] > 1: # 存在冲突
+                    # 利用前面或者后面的帧来解决冲突
+                    Flag = False # 标记冲突是否可以解决
+                    for frame_before in range(frame-1,frame_start-1,-1):
+                        if (frame_before in frame_cnt_dict) and frame_cnt_dict[frame_before] == 1: # 需要判断是否存在
+                            Flag = True
+                            bbox_before = np.array(mapping_node_id_to_bbox[frame_node_dict[frame_before][0]][0])
+                            bbox_now = np.array([mapping_node_id_to_bbox[node][0] for node in frame_node_dict[frame]])
+                            matrix = compute_iou_between_bbox_list(bbox_before.reshape(-1, 2, 2), bbox_now.reshape(-1, 2, 2)) #[(left, top), (right, bottom)] (row，col)
+                            col_idx = np.argmax(matrix)
+                            final_node = frame_node_dict[frame][col_idx]
+                            remove_node = set(frame_node_dict[frame]) - set([frame_node_dict[frame][col_idx]])
+                            [cluster_tracks[track1].pop(node) for node in remove_node]
+                            frame_cnt_dict[frame] = 1
+                            frame_node_dict[frame] = [final_node] # list
+                            break
+                    if not Flag:
+                        for frame_after in range(frame+1,frame_end+1):
+                            if (frame_after in frame_cnt_dict) and frame_cnt_dict[frame_after] == 1:
+                                Flag = True
+                                bbox_after = np.array(mapping_node_id_to_bbox[frame_node_dict[frame_after][0]][0])
+                                bbox_now = np.array([mapping_node_id_to_bbox[node][0] for node in frame_node_dict[frame]])
+                                matrix = compute_iou_between_bbox_list(bbox_after.reshape(-1, 2, 2), bbox_now.reshape(-1, 2, 2)) #[(left, top), (right, bottom)] (row，col)
+                                col_idx = np.argmax(matrix)
+                                final_node = frame_node_dict[frame][col_idx]
+                                remove_node = set(frame_node_dict[frame]) - set([frame_node_dict[frame][col_idx]])
+                                [cluster_tracks[track1].pop(node) for node in remove_node]
+                                frame_cnt_dict[frame] = 1
+                                frame_node_dict[frame] = [final_node]
+                            break
+                    # 冲突无法解决的时候选取每帧当中置信度更高bbox
+                    if not Flag:
+                        confidence_list = [mapping_node_id_to_bbox[node][1] for node in frame_node_dict[frame]]
+                        final_node = frame_node_dict[frame][np.argmax(confidence_list)]
+                        remove_node = set(frame_node_dict[frame]) - set([final_node])
+                        [cluster_tracks[track1].pop(node) for node in remove_node]
+                        frame_cnt_dict[frame] = 1
+                        frame_node_dict[frame] = [final_node]
+    ### 对于K-means当中的tracklets进行合并 ###
+    '''
+    1、合并的时候以较小的track_id为准
+    2、前向后向回归
+    [1,2] [4,5,6]则前面的回归到第4帧，后面的向前回归到第2帧，然后计算回归帧以及已有帧的平均iou相似度
+    '''
+    def tracklet_regression(track1,frame_start,frame_end,frame_span1):
+        '''
+        track1:key node
+        '''
+        frame_bbox1 = {int(mapping_node_id_to_bbox[node][2].split('.')[0]): mapping_node_id_to_bbox[node][0] for node in
+                       track1}  # key:frame(int) value:bbox
+        if len(frame_span1) == (frame_end - frame_start + 1): # 此时不需要进行回归
+            frame_bbox1 = dict(sorted(frame_bbox1.items(), key=operator.itemgetter(0)))
+            return frame_bbox1
+        width1 = np.mean([frame_bbox1[frame][1][0] - frame_bbox1[frame][0][0] for frame in frame_bbox1])
+        height1 = np.mean([frame_bbox1[frame][1][1] - frame_bbox1[frame][0][1] for frame in frame_bbox1])
+        horicenter_coordinates1 = (np.array(
+            [frame_bbox1[frame][1][0] + frame_bbox1[frame][0][0] for frame in frame_bbox1]) / 2.0).tolist()  # 水平
+        vertcenter_coordinates1 = (np.array(
+            [frame_bbox1[frame][1][1] + frame_bbox1[frame][0][1] for frame in frame_bbox1]) / 2.0).tolist()  # 垂直
+        horicenter_fitter_coefficients = np.polyfit(frame_span1, horicenter_coordinates1, 1)
+        vertcenter_fitter_coefficients = np.polyfit(frame_span1, vertcenter_coordinates1, 1)
+        horicenter_fitter = np.poly1d(horicenter_fitter_coefficients)  # np.poly1d根据数组生成一个多项式
+        vertcenter_fitter = np.poly1d(vertcenter_fitter_coefficients)
+        for frame in range(frame_start, frame_end + 1):
+            if frame in frame_bbox1:  # 已经存在
+                continue
+            else:  #
+                frame_bbox1[frame] = [
+                    (horicenter_fitter(float(frame)) - width1 / 2.0, vertcenter_fitter(float(frame)) - height1 / 2.0),
+                    (horicenter_fitter(float(frame)) + width1 / 2.0, vertcenter_fitter(float(frame)) + height1 / 2.0)]
+        # frame_bbox1 = dict(sorted(frame_bbox1.items(),key=lambda d:d[0]))
+        # frame_bbox1 = sorted(frame_bbox1)
+        frame_bbox1 = dict(sorted(frame_bbox1.items(), key=operator.itemgetter(0)))  # 按照key值升序,从而使得计算iou的时候帧数是对应的
+        return frame_bbox1
+    ############ 处理clusters当中需要合并以及重复的track ############
+    print('### processing cluster results ###')
+    remove_list = []
+    for id1 in cluster_tracks:
+        for id2 in cluster_tracks:
+            if id1 >= id2 or len(cluster_tracks[id1]) <2 or len(cluster_tracks[id2])<2:
+                continue
+            track1 = cluster_tracks[id1]
+            frame_span1 = [int(mapping_node_id_to_bbox[node][2].split('.')[0]) for node in track1] # 自变量
+            frame_bbox1 = tracklet_regression(track1,frame_start,frame_end,frame_span1)
+            track2 = cluster_tracks[id2]
+            frame_span2 = [int(mapping_node_id_to_bbox[node][2].split('.')[0]) for node in track2]
+            frame_bbox2 = tracklet_regression(track2, frame_start, frame_end,frame_span2)
+            tmp_span = frame_span1 + frame_span2
+            ### regression ##
+            ### 从最小的frame到最大的frame计算相似度 ###
+            tracklet1 = np.array([frame_bbox1[frame] for frame in frame_bbox1])
+            tracklet2 = np.array([frame_bbox2[frame] for frame in frame_bbox2])
+            tracklet_ious_matrix  = compute_iou_between_bbox_list(tracklet1.reshape(-1, 2, 2), tracklet2.reshape(-1, 2, 2))
+            # tracklet_overlap_matrix = compute_overlap_between_bbox_list(tracklet1.reshape(-1, 2, 2), tracklet2.reshape(-1, 2, 2))
+            ### 判断是否有相同帧 ###
+            if len(set(frame_span1+frame_span2)) >= len(frame_span1) + len(frame_span2):
+                # 是否可以合并
+                ious = np.diagonal(tracklet_ious_matrix)
+                print('track{0} and track{1} iou is {2}'.format(id1,id2,np.mean(ious[frame_span.index(min(tmp_span)):frame_span.index(max(tmp_span))+1])))
+                if np.mean(ious[frame_span.index(min(tmp_span)):frame_span.index(max(tmp_span))+1]) > 0.55: # 0.66,0.57，0.64
+                    # 不是一个人的最大0.478,0.60
+                    id = min(id1,id2)
+                    remove_id = max(id1,id2)
+                    # track[id] = dict(track1,**track2) # 关键字必须是str数据类型
+                    cluster_tracks[id].update(cluster_tracks[remove_id])
+                    remove_list.append(remove_id)
+            elif set(frame_span1).issubset(set(frame_span2)) or set(frame_span2).issubset(set(frame_span1)):
+                # 是否需要删除多余
+                common_frames = set(frame_span1).intersection(set(frame_span2))
+                tracklet_bbox1 = np.array([frame_bbox1[frame] for frame in common_frames])
+                tracklet_bbox2 = np.array([frame_bbox2[frame] for frame in common_frames])
+                tracklet_overlap_matrix  = compute_overlap_between_bbox_list(tracklet_bbox1.reshape(-1, 2, 2), tracklet_bbox2.reshape(-1, 2, 2))
+                overlap = np.diagonal(tracklet_overlap_matrix)
+                if np.mean(overlap) > 0.9:
+                    print('track{0} and track{1} overlap is {2}'.format(id1,id2,np.mean(overlap)))
+                    id = id1 if len(frame_span1) < len(frame_span2) else id2 # id表示取其中frame_span更短的那一个
+                    remove_list.append(id)
+
+    remove_list = np.unique(remove_list).tolist()
+    [cluster_tracks.pop(trackid) for trackid in remove_list]
+    ############ 对K-means当中与split_each_track当中重合度较高的轨迹进行合并 #########
+    print('### processing cluster results and original ssp###')
+    ### 此处使用overlap进行计算并且删除掉轨迹更短的那一条 ###
+    dulplicate_track_list = []
+
+    # 需要选择两者当中不重合部分进行比较
+    for id1 in list(definite_track_list):
+        for id2 in cluster_tracks:
+            if id1 == id2 or len(current_video_segment_predicted_tracks_bboxes_test_SSP[id1]) <2 or len(cluster_tracks[id2])<2: # 无法进行回归的情况直接跳过
+                continue
+            ### 计算common frames当中的overlap ###
+            track1 = current_video_segment_predicted_tracks_bboxes_test_SSP[id1]
+            track2 = cluster_tracks[id2]
+            frame_span1 = [int(mapping_node_id_to_bbox[node][2].split('.')[0]) for node in track1] # 自变量
+            frame_span2 = [int(mapping_node_id_to_bbox[node][2].split('.')[0]) for node in track2]
+            frame_bbox1 = {int(mapping_node_id_to_bbox[node][2].split('.')[0]): mapping_node_id_to_bbox[node][0] for node in track1}
+            frame_bbox2 = {int(mapping_node_id_to_bbox[node][2].split('.')[0]): mapping_node_id_to_bbox[node][0] for node in track2}
+            ## 如果两个集合为包含关系 ##
+            if set(frame_span1).issubset(set(frame_span2)) or set(frame_span2).issubset(set(frame_span1)):
+                common_frames = set(frame_span1).intersection(set(frame_span2)) # 
+                tracklet_bbox1 = np.array([frame_bbox1[frame] for frame in common_frames])
+                tracklet_bbox2 = np.array([frame_bbox2[frame] for frame in common_frames])
+                tracklet_overlap_matrix  = compute_overlap_between_bbox_list(tracklet_bbox1.reshape(-1, 2, 2), tracklet_bbox2.reshape(-1, 2, 2))
+                overlap = np.diagonal(tracklet_overlap_matrix)
+                if np.mean(overlap) > 0.9:
+                    print('track{0} and track{1} overlap is {2}'.format(id1, id2, np.mean(overlap)))
+                    id = id1 if len(frame_span1) < len(frame_span2) else id2 # id表示取其中frame_span更短的那一个
+                    dulplicate_track_list.append(id) # 可能是split当中的轨迹
+    dulplicate_track_list = np.unique(dulplicate_track_list).tolist() # 需要唯一
+    [cluster_tracks.pop(trackid) for trackid in dulplicate_track_list if trackid in cluster_tracks]
+    [split_each_track.pop(trackid) for trackid in dulplicate_track_list if trackid in split_each_track] # 删除split_each_track会导致后面的结果出问题
+    show_fix_clusters(cluster_tracks)
+    ##### 删除掉长度为1的轨迹 #####
+    split_each_track_refined = {}
+    final_track_list = np.unique(list(definite_track_list) + list(cluster_tracks.keys())).tolist()
+
+    for track_id in final_track_list:
+        # if trajectory_idswitch_reliability_dict[track_id][0] == tracklet_len:
+        if track_id not in list(cluster_tracks.keys()) and track_id in split_each_track: #  不在clusters当中并且在split_each_track当中
+        ### 去除split_each_track当中唯一点形成的轨迹 ###
+            # if int((len(split_each_track[track_id])+1)/2) > 1:
+            split_each_track_refined[track_id] = copy.deepcopy(split_each_track[track_id])
+        # 插入节点之间的连边形成轨迹
+        elif track_id in cluster_tracks:
+            for node_to_add in cluster_tracks[track_id]:
+                if track_id not in split_each_track_refined:
+                    split_each_track_refined[track_id] = []
+                split_each_track_refined[track_id].append([str(2 * node_to_add - 1), str(2 * node_to_add)])
+            split_each_track_refined[track_id] = interpolate_to_obtain_traj(split_each_track_refined[track_id])
+        else:
+            continue
+    delete_list = []
+    
+    for split_each_track_refined_key in split_each_track_refined:
+        mean_score = np.mean([mapping_node_id_to_bbox[int(node_pair[1]) / 2][1] for node_pair in split_each_track_refined[split_each_track_refined_key] if int(node_pair[1]) % 2 == 0])
+        #print(split_each_track_refined_key,'mean confidece',mean_score,'length',(len(split_each_track_refined[split_each_track_refined_key])+1)/2)
+        remain_flag = mean_score >= 0.75 or mean_score*math.sqrt((len(split_each_track_refined[split_each_track_refined_key])+1)/2) > 2 # 设置为1
+        if (len(split_each_track_refined[split_each_track_refined_key])+1)/2 <= 1: # or mean_score*math.sqrt((len(split_each_track_refined[split_each_track_refined_key])+1)/2)< 2 : # 取消掉长度小于1的轨迹
+        # # if (len(split_each_track_refined[split_each_track_refined_key])+1)/2 <= 1 or mean_score < 0.8: # 取消掉长度小于1的轨迹
+        # ### 0.8 太大了 ###
+            delete_list.append(split_each_track_refined_key)
+    # del split_each_track_refined[0] 没有必要
+    [split_each_track_refined.pop(track) for track in delete_list]
+    result[0] = 'Predicted tracks' + '\n' + convert_dict_to_str(result, split_each_track_refined)
+    return result
+
+
+def cluster_fix(result, result_second,mapping_edge_id_to_cost, mapping_node_id_to_bbox, mapping_node_id_to_bbox_second,mapping_node_id_to_features, mapping_node_id_to_features_second, device, source,tracklet_len):
     global batch_id
     # global tracklet_len
     # initialize parameters for BO
@@ -570,18 +876,8 @@ def cluster_fix(result, mapping_edge_id_to_cost, mapping_node_id_to_bbox, mappin
     batch_size = int(int(max_evals - n_init) / 2)# int(int(max_evals - n_init) / 2) # 90
     assert(n_init < max_evals)
     seed = 0  # To get the same Sobol points
-    dim, data_dimension = tracklet_len , tracklet_len
-    shared_args = {
-        "n_init": n_init,
-        "max_evals": max_evals,
-        "batch_size": batch_size,
-        "seed": seed,
-    }
     SMOKE_TEST = os.environ.get("SMOKE_TEST")
     pykeops.test_torch_bindings()
-    USE_KEOPS = True if not SMOKE_TEST else False
-    N_CAND = 50000 if not SMOKE_TEST else 10
-    N_CAND_CHOL = 10000 if not SMOKE_TEST else 10
     dtype = torch.float
     # x表示key mapping_node_id_to_bbox[x][2]:frame name  frame list:unique frame name list
     frame_list = np.unique([mapping_node_id_to_bbox[x][2] for x in mapping_node_id_to_bbox]) # potential bug no sort
@@ -589,52 +885,11 @@ def cluster_fix(result, mapping_edge_id_to_cost, mapping_node_id_to_bbox, mappin
     # we only revise result instead of adding any node to it
     # split_each_track:每条轨迹所包含的节点连接顺序，split_each_track_valid_mask:不正确的点标注为-1,不正确的边标注为0,正确结果标注为１
     split_each_track, split_each_track_valid_mask = update_split_each_track_valid_mask(result)
+    split_each_track_second, split_each_track_valid_mask_second = update_split_each_track_valid_mask(result_second)
     # 使用SSP的轨迹结果
     # trajectory_idswitch_dict 对应于在node_list当中的索引
     current_video_segment_predicted_tracks_bboxes_test_SSP,trajectory_node_dict,trajectory_idswitch_dict,trajectory_idswitch_reliability_dict,trajectory_segment_nodes_dict = convert_track_to_stitch_format(split_each_track, mapping_node_id_to_bbox, mapping_node_id_to_features,split_each_track_valid_mask)
-    
-    # # collect invalid nodes and edges, then determine possible traj belongings of each node in mapping_node_id_to_bbox
-    # mapping_node_id_to_belongings = {} #每一个节点可能属于的轨迹集合
-    # for mapping_node_id_to_bbox_id in mapping_node_id_to_bbox:
-    #     mapping_node_id_to_belongings[mapping_node_id_to_bbox_id] = []
-    # for split_each_track_valid_mask_id in split_each_track_valid_mask: # 遍历每一条轨迹
-    #     if (0 in split_each_track_valid_mask[split_each_track_valid_mask_id]) or (-1 in split_each_track_valid_mask[split_each_track_valid_mask_id]):# 表示该条轨迹有异常结果
-    #         # 无效的segment开始，从0开始
-    #         invalid_segments_starts = [(instant + 1) for instant in range(len(split_each_track_valid_mask[split_each_track_valid_mask_id]) - 1) if (split_each_track_valid_mask[split_each_track_valid_mask_id][instant] == 1 and split_each_track_valid_mask[split_each_track_valid_mask_id][instant + 1] <= 0)] + ([0] if split_each_track_valid_mask[split_each_track_valid_mask_id][0] <= 0 else []) #
-    #         other_traj_correlated_to_curr_traj = [split_each_track_valid_mask_id] # 包含[curr_invalid_segments_start,curr_invalid_segments_end]内点的其他轨迹
-    #         for curr_invalid_segments_start in invalid_segments_starts: #　对于每一个curr_invalid_segments_start计算其终点curr_invalid_segments_end
-    #             curr_invalid_segments_end= len(split_each_track_valid_mask[split_each_track_valid_mask_id]) - 1 #从curr_invalid_segments_start开始向后的所有都有可能出错
-    #             if len([x for x in range(curr_invalid_segments_start, len(split_each_track_valid_mask[split_each_track_valid_mask_id]) - 1) if split_each_track_valid_mask[split_each_track_valid_mask_id][x + 1] == 1]) > 0:
-    #                 curr_invalid_segments_end = [x for x in range(curr_invalid_segments_start, len(split_each_track_valid_mask[split_each_track_valid_mask_id]) - 1) if split_each_track_valid_mask[split_each_track_valid_mask_id][x + 1] == 1][0] # 对segment终点修正
-    #             for invalid_node in [split_each_track[split_each_track_valid_mask_id][x] for x in range(curr_invalid_segments_start, curr_invalid_segments_end + 1)]:
-    #                 other_traj_correlated_to_curr_traj += [split_each_track_valid_mask_other_id for split_each_track_valid_mask_other_id in [x for x in split_each_track_valid_mask if x != split_each_track_valid_mask_id] if (invalid_node in split_each_track[split_each_track_valid_mask_other_id] or [invalid_node[1], invalid_node[0]] in split_each_track[split_each_track_valid_mask_other_id])] # split_each_track_valid_mask_other_id:包含invalid node的其他轨迹
-    #         # 与当前轨迹相关的其他轨迹
-    #         other_traj_correlated_to_curr_traj = np.unique(other_traj_correlated_to_curr_traj).tolist()
-    #
-    #         for curr_invalid_segments_start in invalid_segments_starts:
-    #             curr_invalid_segments_end = len(split_each_track_valid_mask[split_each_track_valid_mask_id]) - 1
-    #             if len([x for x in range(curr_invalid_segments_start, len(split_each_track_valid_mask[split_each_track_valid_mask_id]) - 1) if split_each_track_valid_mask[split_each_track_valid_mask_id][x + 1] == 1]) > 0:
-    #                 curr_invalid_segments_end = [x for x in range(curr_invalid_segments_start, len(split_each_track_valid_mask[split_each_track_valid_mask_id]) - 1) if split_each_track_valid_mask[split_each_track_valid_mask_id][x + 1] == 1][0] # 对segment终点修正
-    #             for invalid_node in [split_each_track[split_each_track_valid_mask_id][x] for x in range(curr_invalid_segments_start, curr_invalid_segments_end + 1)]: # 遍历该条轨迹的invalid_node
-    #                 for split_each_track_valid_mask_other_id in [split_each_track_valid_mask_other_id for split_each_track_valid_mask_other_id in [x for x in split_each_track_valid_mask if x != split_each_track_valid_mask_id] if (invalid_node in split_each_track[split_each_track_valid_mask_other_id] or [invalid_node[1], invalid_node[0]] in split_each_track[split_each_track_valid_mask_other_id])]:
-    #                      # 其余的track　id（包含该无效边或其相反边）
-    #                     allocation_start_idx = split_each_track[split_each_track_valid_mask_other_id].index(invalid_node if invalid_node in split_each_track[split_each_track_valid_mask_other_id] else [invalid_node[1], invalid_node[0]]) # 其余轨迹中invalid_node的开始位置
-    #                     allocation_end_idx = len(split_each_track[split_each_track_valid_mask_other_id])-1
-    #                     if len([x for x in range(allocation_start_idx, len(split_each_track_valid_mask[split_each_track_valid_mask_other_id]) - 1) if split_each_track_valid_mask[split_each_track_valid_mask_other_id][x + 1] == 1]) > 0:
-    #                         allocation_end_idx = [x for x in range(allocation_start_idx, len(split_each_track_valid_mask[split_each_track_valid_mask_other_id]) - 1) if split_each_track_valid_mask[split_each_track_valid_mask_other_id][x + 1] == 1][0] # 对segment终点修正
-    #                     # for other_to_this_idx in [x for x in range(allocation_start_idx, len(split_each_track_valid_mask[split_each_track_valid_mask_other_id])) if (split_each_track_valid_mask[split_each_track_valid_mask_other_id][x] == 1 and int(split_each_track[split_each_track_valid_mask_other_id][x][0]) % 2 == 1 and int(split_each_track[split_each_track_valid_mask_other_id][x][1]) % 2 == 0)]: #其余轨迹从无效边到最后所有表示人的edge
-    #                     for other_to_this_idx in [x for x in range(allocation_start_idx, allocation_end_idx+1) if (split_each_track_valid_mask[split_each_track_valid_mask_other_id][x] == -1 and int(split_each_track[split_each_track_valid_mask_other_id][x][0]) % 2 == 1 and int(split_each_track[split_each_track_valid_mask_other_id][x][1]) % 2 == 0)]: #其余轨迹从无效边到最后所有表示人的node
-    #                         mapping_node_id_to_belongings[int(int(split_each_track[split_each_track_valid_mask_other_id][other_to_this_idx][1]) / 2)] += other_traj_correlated_to_curr_traj #.append(split_each_track_valid_mask_id)
-    #                 curr_invalid_node_shared_by_other_traj_list = [split_each_track_valid_mask_other_id for split_each_track_valid_mask_other_id in [x for x in split_each_track_valid_mask if x != split_each_track_valid_mask_id] if (invalid_node in split_each_track[split_each_track_valid_mask_other_id] or [invalid_node[1], invalid_node[0]] in split_each_track[split_each_track_valid_mask_other_id])]
-    #                 # 包含当前invalide node 的所有其他轨迹list
-    #                 # for later_node_idx in [x for x in range(split_each_track[split_each_track_valid_mask_id].index(invalid_node), len(split_each_track[split_each_track_valid_mask_id])) if (x % 2 == 0 and split_each_track_valid_mask[split_each_track_valid_mask_id][x] == 1)]: #当前轨迹invalid_node之后表示人的edge并且mask=1
-    #                 for later_node_idx in [x for x in range(split_each_track[split_each_track_valid_mask_id].index(invalid_node), curr_invalid_segments_end+1) if (x % 2 == 0 and split_each_track_valid_mask[split_each_track_valid_mask_id][x] == -1)]: #当前轨迹invalid_node之后表示人的node并且mask=-1
-    #                     mapping_node_id_to_belongings[int(int(split_each_track[split_each_track_valid_mask_id][later_node_idx][1]) / 2)] += other_traj_correlated_to_curr_traj # curr_invalid_node_shared_by_other_traj_list
-    # for split_each_track_valid_mask_id in split_each_track_valid_mask: # 对于其余时刻mask正确的情况,belongings唯一
-    #     for instant in [x for x in range(len(split_each_track_valid_mask[split_each_track_valid_mask_id])) if (x % 2 == 0 and split_each_track_valid_mask[split_each_track_valid_mask_id][x] == 1)]:# ???
-    #         mapping_node_id_to_belongings[int(int(split_each_track[split_each_track_valid_mask_id][instant][1]) / 2)].append(split_each_track_valid_mask_id)
-    #
-    #
+    current_video_segment_predicted_tracks_bboxes_test_SSP_second,trajectory_node_dict_second,trajectory_idswitch_dict_second,trajectory_idswitch_reliability_dict_second,trajectory_segment_nodes_dict_second = convert_track_to_stitch_format(split_each_track_second, mapping_node_id_to_bbox_second, mapping_node_id_to_features_second,split_each_track_valid_mask_second)
     ########## 聚类 ############
     # predicted_tracks_centers,predicted_tracks_bboxes,predicted_tracks_bboxes_test,delete_track,mapping_node_id_to_belongings,trajectory_similarity_dict = convert_track_to_bbox_list(split_each_track, mapping_node_id_to_bbox,mapping_node_id_to_belongings,trajectory_node_dict,trajectory_idswitch_dict,trajectory_idswitch_reliability_dict,mapping_node_id_to_features)
     total_nodes = list(mapping_node_id_to_bbox.keys())  # all detection nodes
@@ -679,9 +934,10 @@ def cluster_fix(result, mapping_edge_id_to_cost, mapping_node_id_to_bbox, mappin
     normed_reid_data = scaler.fit_transform(reid_matrix)
 
     pca = PCA()
+
     pca.fit(normed_reid_data)
     explaned_variance = pca.explained_variance_ratio_
-    # explaned_variance_sum = np.cumsum(explaned_variance)
+    explaned_variance_sum = np.cumsum(explaned_variance)
     bbox_matrix = np.array([np.array(mapping_node_id_to_bbox[x][0]).flatten() for x in indefinite_node])
     width = bbox_matrix[:,2] - bbox_matrix[:,0]
     height = bbox_matrix[:,3] - bbox_matrix[:,1]
@@ -703,49 +959,26 @@ def cluster_fix(result, mapping_edge_id_to_cost, mapping_node_id_to_bbox, mappin
     time_matrix = np.array([int(mapping_node_id_to_bbox[x][2].split('.')[0]) for x in indefinite_node]).reshape(-1, 1)
 
     data = np.concatenate((reid_pca, bbox_matrix,aspect_ratio,area,time_matrix), axis=1)
-    # cluster = KMeans(n_clusters=n_clusters, random_state=0).fit(data)
+    cluster = KMeans(n_clusters=n_clusters, random_state=0).fit(data)
     # centroid = cluster.cluster_centers_
     # y_pred = cluster.labels_
     ### clustering ###
     # 1. Load list of points for cluster analysis.
     # sample = read_sample(FCPS_SAMPLES.SAMPLE_TWO_DIAMONDS)
-
-    # 2. Prepare initial centers using K-Means++ method.
-    ## 可以先找出中心点索引，加入到initial_centers当中这个list来 ##
     sample = data
-    initial_centers = kmeans_plusplus_initializer(sample, n_clusters,random_state=1).initialize() # list,为每个node当中点的信息
+    # 2. Prepare initial centers using K-Means++ method.
+    initial_centers = kmeans_plusplus_initializer(sample, n_clusters,random_state=1).initialize()
 
-    ## 以下为data_second当中的数据 ##
-    reid_second = np.zeros((len(mapping_node_id_to_bbox_second),4))              # (33,4)
-    bbox_matrix_second  = np.array([np.array(mapping_node_id_to_bbox_second[x][0]).flatten() for x in mapping_node_id_to_bbox_second])
-    width_second = bbox_matrix_second[:,2] - bbox_matrix_second[:,0]
-    height_second = bbox_matrix_second[:,3] - bbox_matrix_second[:,1]
-    aspect_ratio_second = 10*(width_second / height_second).reshape(-1, 1)
-    area_second = (width_second * height_second).reshape(-1, 1)/100
-    time_matrix_second = np.array([int(mapping_node_id_to_bbox_second[x][2].split('.')[0]) for x in mapping_node_id_to_bbox_second]).reshape(-1, 1)
-    data_second = np.concatenate((reid_second, bbox_matrix_second, aspect_ratio_second, area_second, time_matrix_second), axis=1)
-
-    sample = np.concatenate((data,data_second),axis=0)
     # 3. create metric that will be used for clustering
 
     def my_distance(point1, point2):
-        if np.any(point1[:4]) and np.any(point2[:4]): # reid均不为0
-            dimension = len(point1)
-            result = 0.0
-            for i in range(dimension - 1):
-                result += abs(point1[i] - point2[i]) ** 2
-            eps = 0.01
-            if point1[dimension - 1] == point2[dimension - 1]:
-                result += 1 / eps
-        else:
-            dimension = len(point1)
-            result = 0.0
-            for i in range(4,dimension - 1): # 不计算reid误差
-                result += abs(point1[i] - point2[i]) ** 2
-            eps = 0.01
-            if point1[dimension - 1] == point2[dimension - 1]:
-                result += 1 / eps
-
+        dimension = len(point1)
+        result = 0.0
+        for i in range(dimension - 1):
+            result += abs(point1[i] - point2[i]) ** 2
+        eps = 0.01
+        if point1[dimension - 1] == point2[dimension - 1]:
+            result += 1 / eps
         return result
 
     my_metric = distance_metric(type_metric.USER_DEFINED, func=my_distance)
@@ -764,7 +997,7 @@ def cluster_fix(result, mapping_edge_id_to_cost, mapping_node_id_to_bbox, mappin
     #     for node in track:
     #         mapping_dict[indefinite_node[node]] = mapping_node_id_to_bbox[indefinite_node[node]]
     #     cluster_tracks[remained_tracks[idx]] = mapping_dict
-    indefinite_node.append(list(mapping_node_id_to_bbox_second.keys()))
+
     for idx, track in enumerate(clusters):
         mapping_dict = {}
         for node in track:
