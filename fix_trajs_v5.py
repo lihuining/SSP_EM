@@ -168,7 +168,7 @@ def convert_track_to_stitch_format(split_each_track,mapping_node_id_to_bbox,mapp
             #
             if split_each_track_valid_mask[track_id][idx] == 1:
                 trajectory_idswitch_reliability += 1
-            trajectory_segment.append(int(node_id))
+                trajectory_segment.append(int(node_id))
             bbox_pre = copy.deepcopy(bbox)
 
             confidence_score = mapping_node_id_to_bbox[node_id][1]
@@ -588,7 +588,7 @@ def tracks_combination(remained_tracks,result,result_second,mapping_node_id_to_b
         # for low confidence track, only idswitch track need revise
         if len(trajectory_idswitch_reliability_dict[track_id]) > 1:
             for i in range(len(trajectory_idswitch_reliability_dict[track_id])):
-                if trajectory_idswitch_reliability_dict[track_id][i] < 3: # 不考虑小于2的tracklet
+                if trajectory_idswitch_reliability_dict[track_id][i] < 3: # 不考虑小于3的tracklet
                     continue
                 segment_nodes = trajectory_segment_nodes_dict[track_id][i]
                 mean_conf = np.mean([mapping_node_id_to_bbox_second[node][1] for node in segment_nodes])
@@ -599,7 +599,7 @@ def tracks_combination(remained_tracks,result,result_second,mapping_node_id_to_b
                     indefinite_node_list.append(segment_nodes)
         else: # 此时有可能是单一的node
             segment_nodes = trajectory_segment_nodes_dict[track_id][0]
-            if len(segment_nodes) == 1:
+            if len(segment_nodes) <= 3:
                 continue
             mean_conf = np.mean([mapping_node_id_to_bbox_second[node][1] for node in segment_nodes])
             max_conf = np.max([mapping_node_id_to_bbox_second[node][1] for node in segment_nodes])
@@ -885,7 +885,7 @@ def tracks_combination(remained_tracks,result,result_second,mapping_node_id_to_b
                 tracklet_bbox2 = np.array([frame_bbox2[frame] for frame in common_frames])
                 tracklet_overlap_matrix  = compute_overlap_between_bbox_list(tracklet_bbox1.reshape(-1, 2, 2), tracklet_bbox2.reshape(-1, 2, 2))
                 overlap = np.diagonal(tracklet_overlap_matrix)
-                if np.mean(overlap) > 0.9:
+                if np.mean(overlap) > 0.9: # 0.66
                     print('track{0} and track{1} overlap is {2}'.format(id1, id2, np.mean(overlap)))
                     id = id1 if len(frame_span1) < len(frame_span2) else id2 # id表示取其中frame_span更短的那一个
                     dulplicate_track_list.append(id) # 可能是split当中的轨迹

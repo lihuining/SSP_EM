@@ -1672,33 +1672,6 @@ def stitching_tracklets(node_matching_dict,tracklet_inner_cnt, current_video_seg
         #     tracklets_similarity_matrix[[x for x in previous_video_segment_predicted_tracks].index(previous_tracklet_id),:] = 1
         #     continue
         trajectory_from_prev = previous_video_segment_predicted_tracks_bboxes[previous_tracklet_id] # 前一个batch的一条轨迹
-        # if len(trajectory_from_prev) >= 3:
-        #     for trajectory_from_prev_key in range(1, len([x for x in trajectory_from_prev]) - 1):
-        #         curr_left = trajectory_from_prev[[x for x in trajectory_from_prev][trajectory_from_prev_key]][0][0]
-        #         curr_top = trajectory_from_prev[[x for x in trajectory_from_prev][trajectory_from_prev_key]][0][1]
-        #         curr_right = trajectory_from_prev[[x for x in trajectory_from_prev][trajectory_from_prev_key]][1][0]
-        #         curr_bottom = trajectory_from_prev[[x for x in trajectory_from_prev][trajectory_from_prev_key]][1][1]
-        #
-        #         prev_left = trajectory_from_prev[[x for x in trajectory_from_prev][trajectory_from_prev_key - 1]][0][0]
-        #         prev_top = trajectory_from_prev[[x for x in trajectory_from_prev][trajectory_from_prev_key - 1]][0][1]
-        #         prev_right = trajectory_from_prev[[x for x in trajectory_from_prev][trajectory_from_prev_key - 1]][1][0]
-        #         prev_bottom = trajectory_from_prev[[x for x in trajectory_from_prev][trajectory_from_prev_key - 1]][1][1]
-        #
-        #         next_left = trajectory_from_prev[[x for x in trajectory_from_prev][trajectory_from_prev_key + 1]][0][0]
-        #         next_top = trajectory_from_prev[[x for x in trajectory_from_prev][trajectory_from_prev_key + 1]][0][1]
-        #         next_right = trajectory_from_prev[[x for x in trajectory_from_prev][trajectory_from_prev_key + 1]][1][0]
-        #         next_bottom = trajectory_from_prev[[x for x in trajectory_from_prev][trajectory_from_prev_key + 1]][1][1]
-        #
-        #         revised_horicenter = (curr_left + curr_right + prev_left + prev_right + next_left + next_right) / 6
-        #         revised_vertcenter = (curr_top + curr_bottom + prev_top + prev_bottom + next_top + next_bottom) / 6
-        #         revised_width = (curr_right - curr_left + prev_right - prev_left + next_right - next_left) / 6
-        #         revised_height = (curr_right - curr_left + prev_right - prev_left + next_right - next_left) / 6
-        #
-        #         trajectory_from_prev[[x for x in trajectory_from_prev][trajectory_from_prev_key]] = [(revised_horicenter - revised_width / 2, \
-        #                                                                                               revised_vertcenter - revised_height / 2), \
-        #                                                                                              (revised_horicenter + revised_width / 2, \
-        #                                                                                               revised_vertcenter + revised_height / 2)]
-
         independent_variable = [float(x[:-4]) for x in trajectory_from_prev]  # 自变量 后四个为图片名称,数目为frame数
         independent_variable_mean = independent_variable[0]# np.mean(independent_variable)
         independent_variable = [x-independent_variable_mean for x in independent_variable]
@@ -1809,7 +1782,7 @@ def stitching_tracklets(node_matching_dict,tracklet_inner_cnt, current_video_seg
         # 对大于0.53的进行排除
         # print(tracklets_similarity_matrix[m[0],m[1]])
         mean_similarity_list.append(tracklets_similarity_matrix[m[0],m[1]])
-        if tracklets_similarity_matrix[m[0],m[1]] >= 0.7:  # 3 and 40
+        if tracklets_similarity_matrix[m[0],m[1]] >= 0.5:  # 3 and 40
             previous_unmatched_tracks.append(previous_tracks_id[m[0]])
             curr_unmatched_tracks.append(current_tracks_id[m[1]])
             continue
@@ -1867,7 +1840,7 @@ def stitching_tracklets(node_matching_dict,tracklet_inner_cnt, current_video_seg
     #     previous_unmatched_tracks.remove(second_prev_track_list[match[0]])
     #     curr_unmatched_tracks.remove(second_curr_track_list[match[1]])
     #     print('matched_reid previous track id(global) is {0},current track id(local) is {1}'.format(second_prev_track_list[match[0]],second_curr_track_list[match[1]]))
-
+    print('previous_unmatched(global) track {},curr_unmatched_track(local) track {} '.format(previous_unmatched_tracks,curr_unmatched_tracks))
     return  result_dict,previous_unmatched_tracks,curr_unmatched_tracks
 
     # # iou_statistics = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 2.0, 0.0, \
@@ -3463,7 +3436,8 @@ def detect(opt,exp,args):
             current_video_segment_predicted_tracks_bboxes_test_SSP,trajectory_node_dict,trajectory_idswitch_dict,trajectory_idswitch_reliability_dict,trajectory_segment_nodes_dict = track_processing(split_each_track_SSP, mapping_node_id_to_bbox, mapping_node_id_to_features,split_each_track_valid_mask)
             n_clusters = 0 # 最大轨迹数目，第二次低置信度点不增加轨迹数目只改变ssp结果
             for track_id in trajectory_idswitch_reliability_dict:
-                if len(trajectory_idswitch_reliability_dict[track_id]) > 1:
+                if len(trajectory_idswitch_reliability_dict[track_id]) > 1: # 发生了idswitch的轨迹都应当加入到error_track当中
+                    error_tracks.append(track_id)
                     for i in range(len(trajectory_idswitch_reliability_dict[track_id])):
                         if trajectory_idswitch_reliability_dict[track_id][i] < 2:
                             continue
@@ -3472,7 +3446,7 @@ def detect(opt,exp,args):
                         # if mean_conf > 0.8:
                         n_clusters += 1
                         indefinite_node += segment_nodes
-                        error_tracks.append(track_id)
+
                 elif len(trajectory_idswitch_reliability_dict[track_id]) == 1 and len(current_video_segment_predicted_tracks_bboxes_test_SSP[track_id])< tracklet_len:
                     indefinite_node += trajectory_node_dict[track_id]
                     n_clusters += 1
