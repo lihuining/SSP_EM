@@ -20,7 +20,7 @@ from sklearn.decomposition import PCA
 import cv2
 import time
 import random
-from MOT_demo_v14_based_on_reid_v22_notstandard_yolov5_add_face_remove_skeleton_ref_v5 import *
+from MOT_demo_v14_based_on_reid_v22_notstandard_yolov5_add_face_remove_skeleton_ref_v11 import *
 from contextlib import ExitStack
 from torch.quasirandom import SobolEngine
 import gpytorch
@@ -679,7 +679,7 @@ def tracks_combination(remained_tracks,result,result_second,mapping_node_id_to_b
         return tracks
 
     # kmeans_visualizer.show_clusters(sample, clusters, final_centers)
-    show_clusters(cluster_tracks,mapping_node_id_to_bbox_second)
+    #show_clusters(cluster_tracks,mapping_node_id_to_bbox_second)
 
     definite_track_list = set(split_each_track.keys()) - set(cluster_tracks.keys()) # definite track in first ssp
     def results_return(definite_track_list,cluster_tracks):
@@ -816,7 +816,7 @@ def tracks_combination(remained_tracks,result,result_second,mapping_node_id_to_b
         frame_bbox1 = dict(sorted(frame_bbox1.items(), key=operator.itemgetter(0)))  # 按照key值升序,从而使得计算iou的时候帧数是对应的
         return frame_bbox1
     ############ 处理clusters当中需要合并以及重复的track ############
-    print('### processing cluster results ###')
+    #print('### processing cluster results ###')
     remove_list = []
     for id1 in cluster_tracks:
         for id2 in cluster_tracks:
@@ -839,7 +839,7 @@ def tracks_combination(remained_tracks,result,result_second,mapping_node_id_to_b
             if len(set(frame_span1+frame_span2)) >= len(frame_span1) + len(frame_span2):
                 # 是否可以合并
                 ious = np.diagonal(tracklet_ious_matrix)
-                print('track{0} and track{1} iou is {2}'.format(id1,id2,np.mean(ious[frame_span.index(min(tmp_span)):frame_span.index(max(tmp_span))+1])))
+                # print('track{0} and track{1} iou is {2}'.format(id1,id2,np.mean(ious[frame_span.index(min(tmp_span)):frame_span.index(max(tmp_span))+1])))
                 if np.mean(ious[frame_span.index(min(tmp_span)):frame_span.index(max(tmp_span))+1]) > 0.55: # 0.66,0.57，0.64
                     # 不是一个人的最大0.478,0.60
                     id = min(id1,id2)
@@ -855,15 +855,15 @@ def tracks_combination(remained_tracks,result,result_second,mapping_node_id_to_b
                 tracklet_overlap_matrix  = compute_overlap_between_bbox_list(tracklet_bbox1.reshape(-1, 2, 2), tracklet_bbox2.reshape(-1, 2, 2))
                 overlap = np.diagonal(tracklet_overlap_matrix)
                 if np.mean(overlap) > 0.9:
-                    print('track{0} and track{1} overlap is {2}'.format(id1,id2,np.mean(overlap)))
+                    # print('track{0} and track{1} overlap is {2}'.format(id1,id2,np.mean(overlap)))
                     id = id1 if len(frame_span1) < len(frame_span2) else id2 # id表示取其中frame_span更短的那一个
                     remove_list.append(id)
 
     remove_list = np.unique(remove_list).tolist()
-    print('removed list',remove_list)
+    # print('removed list',remove_list)
     [cluster_tracks.pop(trackid) for trackid in remove_list]
     ############ 对K-means当中与split_each_track当中重合度较高的轨迹进行合并 #########
-    print('### processing cluster results and original ssp###')
+    # print('### processing cluster results and original ssp###')
     ### 此处使用overlap进行计算并且删除掉轨迹更短的那一条 ###
     dulplicate_track_list = []
 
@@ -887,14 +887,14 @@ def tracks_combination(remained_tracks,result,result_second,mapping_node_id_to_b
                 tracklet_overlap_matrix  = compute_overlap_between_bbox_list(tracklet_bbox1.reshape(-1, 2, 2), tracklet_bbox2.reshape(-1, 2, 2))
                 overlap = np.diagonal(tracklet_overlap_matrix)
                 if np.mean(overlap) > 0.9: # 0.66
-                    print('track{0} and track{1} overlap is {2}'.format(id1, id2, np.mean(overlap)))
+                    #print('track{0} and track{1} overlap is {2}'.format(id1, id2, np.mean(overlap)))
                     id = id1 if len(frame_span1) < len(frame_span2) else id2 # id表示取其中frame_span更短的那一个
                     dulplicate_track_list.append(id) # 可能是split当中的轨迹
     dulplicate_track_list = np.unique(dulplicate_track_list).tolist() # 需要唯一
-    print('dulplicate_track_list',dulplicate_track_list)
+    #print('dulplicate_track_list',dulplicate_track_list)
     [cluster_tracks.pop(trackid) for trackid in dulplicate_track_list if trackid in cluster_tracks]
     [split_each_track.pop(trackid) for trackid in dulplicate_track_list if trackid in split_each_track] # 删除split_each_track会导致后面的结果出问题
-    show_fix_clusters(cluster_tracks,mapping_node_id_to_bbox_second)
+    # show_fix_clusters(cluster_tracks,mapping_node_id_to_bbox_second)
 
     return results_return(definite_track_list,cluster_tracks)
     # ##### 删除掉长度为1的轨迹并且进行结果的整理返回 #####
@@ -1124,7 +1124,7 @@ def cluster_fix(result, result_second,mapping_edge_id_to_cost, mapping_node_id_t
         return tracks
 
     # kmeans_visualizer.show_clusters(sample, clusters, final_centers)
-    show_clusters(cluster_tracks)
+    #show_clusters(cluster_tracks)
 
     definite_track_list = set(split_each_track.keys()) - set(cluster_tracks.keys())
     cluster_all_keys = set(cluster_tracks.keys())
@@ -1223,7 +1223,7 @@ def cluster_fix(result, result_second,mapping_edge_id_to_cost, mapping_node_id_t
         frame_bbox1 = dict(sorted(frame_bbox1.items(), key=operator.itemgetter(0)))  # 按照key值升序,从而使得计算iou的时候帧数是对应的
         return frame_bbox1
     ############ 处理clusters当中需要合并以及重复的track ############
-    print('### processing cluster results ###')
+    #print('### processing cluster results ###')
     remove_list = []
     for id1 in cluster_tracks:
         for id2 in cluster_tracks:
@@ -1246,7 +1246,7 @@ def cluster_fix(result, result_second,mapping_edge_id_to_cost, mapping_node_id_t
             if len(set(frame_span1+frame_span2)) >= len(frame_span1) + len(frame_span2):
                 # 是否可以合并
                 ious = np.diagonal(tracklet_ious_matrix)
-                print('track{0} and track{1} iou is {2}'.format(id1,id2,np.mean(ious[frame_span.index(min(tmp_span)):frame_span.index(max(tmp_span))+1])))
+                #print('track{0} and track{1} iou is {2}'.format(id1,id2,np.mean(ious[frame_span.index(min(tmp_span)):frame_span.index(max(tmp_span))+1])))
                 if np.mean(ious[frame_span.index(min(tmp_span)):frame_span.index(max(tmp_span))+1]) > 0.55: # 0.66,0.57，0.64
                     # 不是一个人的最大0.478,0.60
                     id = min(id1,id2)
@@ -1262,14 +1262,14 @@ def cluster_fix(result, result_second,mapping_edge_id_to_cost, mapping_node_id_t
                 tracklet_overlap_matrix  = compute_overlap_between_bbox_list(tracklet_bbox1.reshape(-1, 2, 2), tracklet_bbox2.reshape(-1, 2, 2))
                 overlap = np.diagonal(tracklet_overlap_matrix)
                 if np.mean(overlap) > 0.9:
-                    print('track{0} and track{1} overlap is {2}'.format(id1,id2,np.mean(overlap)))
+                    #print('track{0} and track{1} overlap is {2}'.format(id1,id2,np.mean(overlap)))
                     id = id1 if len(frame_span1) < len(frame_span2) else id2 # id表示取其中frame_span更短的那一个
                     remove_list.append(id)
 
     remove_list = np.unique(remove_list).tolist()
     [cluster_tracks.pop(trackid) for trackid in remove_list]
     ############ 对K-means当中与split_each_track当中重合度较高的轨迹进行合并 #########
-    print('### processing cluster results and original ssp###')
+    #print('### processing cluster results and original ssp###')
     ### 此处使用overlap进行计算并且删除掉轨迹更短的那一条 ###
     dulplicate_track_list = []
 
@@ -1293,7 +1293,7 @@ def cluster_fix(result, result_second,mapping_edge_id_to_cost, mapping_node_id_t
                 tracklet_overlap_matrix  = compute_overlap_between_bbox_list(tracklet_bbox1.reshape(-1, 2, 2), tracklet_bbox2.reshape(-1, 2, 2))
                 overlap = np.diagonal(tracklet_overlap_matrix)
                 if np.mean(overlap) > 0.9:
-                    print('track{0} and track{1} overlap is {2}'.format(id1, id2, np.mean(overlap)))
+                    # print('track{0} and track{1} overlap is {2}'.format(id1, id2, np.mean(overlap)))
                     id = id1 if len(frame_span1) < len(frame_span2) else id2 # id表示取其中frame_span更短的那一个
                     dulplicate_track_list.append(id) # 可能是split当中的轨迹
     dulplicate_track_list = np.unique(dulplicate_track_list).tolist() # 需要唯一

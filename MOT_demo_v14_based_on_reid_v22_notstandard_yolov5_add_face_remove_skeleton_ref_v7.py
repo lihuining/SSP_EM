@@ -1815,10 +1815,13 @@ def stitching_tracklets(node_matching_dict,tracklet_inner_cnt, current_video_seg
     # print('new track id is {0}'.format(new_track_list))
     # # [previous_unmatched_tracks.remove(track) for track in terminate_track_list] # 去掉未匹配的轨迹避免对其回归造成id_switch
     # # [curr_unmatched_tracks.remove(track) for track in new_track_list]
-    # ### 第二次匹配  使用reid信息 ###
-    # ### 使用列表记录新开始的轨迹以及终止的轨迹，对于不是新开始或者终止的轨迹采用reid信息进行关联 ###
+    ### 第二次匹配  使用reid信息 ###
+    ### 使用列表记录新开始的轨迹以及终止的轨迹，对于不是新开始或者终止的轨迹采用reid信息进行关联 ###
     # second_prev_track_list = list(set(copy.deepcopy(previous_unmatched_tracks)) - set(terminate_track_list))
     # second_curr_track_list = list(set(copy.deepcopy(curr_unmatched_tracks)) - set(new_track_list))
+    # #### reid ####
+    # second_prev_track_list = copy.deepcopy(previous_unmatched_tracks)
+    # second_curr_track_list = copy.deepcopy(curr_unmatched_tracks)
     # reid_similarity = np.zeros((len(second_prev_track_list),len(second_curr_track_list)))
     # for previous_id in second_prev_track_list:
     #      ### 超过10帧之后开始使用reid信息进行匹配 ###
@@ -1829,9 +1832,16 @@ def stitching_tracklets(node_matching_dict,tracklet_inner_cnt, current_video_seg
     #         reid_similarity[second_prev_track_list.index(previous_id), :] = 1
     #         continue
     #     else:
+    #         print('previous representative track {}'.format(previous_id))
     #         prev_track_representative_feature = prev_track[nodes[np.argmax([prev_track[node][2] for node in prev_track])]][3] # 该帧特征
     #     for current_id in second_curr_track_list:
     #         curr_track = current_video_segment_predicted_tracks_bboxes_test[current_id]
+    #         curr_nodes = list(curr_track.keys())
+    #         curr_track_representative_conf = curr_track[curr_nodes[np.argmax([curr_track[node][2] for node in curr_track])]][2]
+    #         if curr_track_representative_conf < 0.8:
+    #             reid_similarity[:, second_curr_track_list.index(current_id)] = 1
+    #             continue
+    #         print('current representative track {}'.format(current_id))
     #         similarity_list = [cosine_similarity(np.array(curr_track[node][3]),np.array(prev_track_representative_feature)) for node in curr_track]
     #         reid_similarity[second_prev_track_list.index(previous_id),second_curr_track_list.index(current_id)] = 1 - np.mean(similarity_list)
     # matched_indices, previous_unmatched_ids, curr_unmatched_ids = linear_assignment(reid_similarity, thresh=0.01)  # ???
@@ -1840,7 +1850,7 @@ def stitching_tracklets(node_matching_dict,tracklet_inner_cnt, current_video_seg
     #     previous_unmatched_tracks.remove(second_prev_track_list[match[0]])
     #     curr_unmatched_tracks.remove(second_curr_track_list[match[1]])
     #     print('matched_reid previous track id(global) is {0},current track id(local) is {1}'.format(second_prev_track_list[match[0]],second_curr_track_list[match[1]]))
-    print('previous_unmatched(global) track {},curr_unmatched_track(local) track {} '.format(previous_unmatched_tracks,curr_unmatched_tracks))
+    print('previous_unmatched(global) track {0},curr_unmatched_track(local) track {1} '.format(previous_unmatched_tracks,curr_unmatched_tracks))
     return  result_dict,previous_unmatched_tracks,curr_unmatched_tracks
 
     # # iou_statistics = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 2.0, 0.0, \
@@ -3448,6 +3458,8 @@ def detect(opt,exp,args):
                         indefinite_node += segment_nodes
 
                 elif len(trajectory_idswitch_reliability_dict[track_id]) == 1 and len(current_video_segment_predicted_tracks_bboxes_test_SSP[track_id])< tracklet_len:
+                    if trajectory_idswitch_reliability_dict[track_id][0] == 1: # 对于只有一个valid_node的不加入进行修正
+                        continue
                     indefinite_node += trajectory_node_dict[track_id]
                     n_clusters += 1
                     error_tracks.append(track_id)
@@ -3482,8 +3494,10 @@ def detect(opt,exp,args):
             ##### second ssp #####
             mapping_node_id_to_bbox_second,mapping_edge_id_to_cost_second,mapping_node_id_to_features_second = mapping_data_preparation(tracklet_pose_collection_second, similarity_module, tracklet_inner_cnt,False)
             ##### 节点数目大于10的情况才能进行ssp #####
-            if len(mapping_node_id_to_bbox_second) > 10:
-                result_second = tracking(mapping_node_id_to_bbox_second, mapping_edge_id_to_cost_second, tracklet_inner_cnt)
+            Second_Flag = False
+            result_second = tracking(mapping_node_id_to_bbox_second, mapping_edge_id_to_cost_second, tracklet_inner_cnt)
+            if 'Predicted tracks' in result_second[0] and len(indefinite_node) > 0:
+            # if len(mapping_node_id_to_bbox_second) > 10:
                 split_each_track_SSP_second,split_each_track_valid_mask_second= update_split_each_track_valid_mask(result_second)
                 ##### 低置信度框 ###
                 for frame_name in unique_frame_list:
@@ -3516,8 +3530,13 @@ def detect(opt,exp,args):
                 ### 对mapping_node_id_to_second 与 mapping_node_id_to_bbox 进行合并 ###
                 mapping_node_id_to_bbox.update(mapping_node_id_to_bbox_second)
                 mapping_node_id_to_features.update(mapping_node_id_to_features_second)
+                Second_Flag = True
+            # elif 'Predicted tracks' not in result_second[0] and len(indefinite_node) > 0:
 
-            split_each_track, valid_mask = update_split_each_track_valid_mask(result)
+            split_each_track, _ = update_split_each_track_valid_mask(result)
+            if not Second_Flag:
+                [split_each_track.pop(track) for track in error_tracks]
+                # [valid_mask.pop(track) for track in error_tracks] # valid_mask 并没有使用
             current_video_segment_predicted_tracks, current_video_segment_predicted_tracks_confidence_score, current_video_segment_predicted_tracks_bboxes, current_video_segment_representative_frames,current_video_segment_predicted_tracks_bboxes_test,current_trajectory_similarity_dict,current_video_segment_all_traj_all_object_features = convert_track_to_stitch_format(split_each_track,mapping_node_id_to_bbox,mapping_node_id_to_features)
             # current_video_segment_predicted_tracks, current_video_segment_predicted_tracks_bboxes, current_video_segment_all_traj_all_object_features, _ = interpolation_fix_missed_detections(current_video_segment_predicted_tracks, current_video_segment_predicted_tracks_bboxes, current_video_segment_all_traj_all_object_features, tracklet_pose_collection)
             frame_list = np.unique([mapping_node_id_to_bbox[x][2] for x in mapping_node_id_to_bbox])
@@ -3557,11 +3576,7 @@ def detect(opt,exp,args):
             start_frame_name = '%03d'%min([int(mapping_node_id_to_bbox[x][2].split('.')[0]) for x in mapping_node_id_to_bbox])+'.jpg' if \
                                min([int(mapping_node_id_to_bbox[x][2].split('.')[0]) for x in mapping_node_id_to_bbox]) < 1000 else \
                                '%03d' % min([int(mapping_node_id_to_bbox[x][2].split('.')[0]) for x in mapping_node_id_to_bbox]) + '.jpg' #???
-            if not os.path.exists(os.path.join(source.split(source.split('/')[-1])[0], 'results', source.split('/')[-1] + '_SSP_EM/')):
-                # source.split(source.split('/')[-1])[0]：'/usr/local/SSP_EM/'
-                #os.mkdir(os.path.join(source.split(source.split('/')[-1])[0], 'results', source.split('/')[-1] + '_SSP_EM/'))
-                os.makedirs(os.path.join(source.split(source.split('/')[-1])[0], 'results', source.split('/')[-1] + '_SSP_EM/'))
-            curr_batch_txt = open(os.path.join(source.split(source.split('/')[-1])[0], 'results', source.split('/')[-1] + '_SSP_EM/') + start_frame_name.replace('.jpg', '.txt'), 'a')
+            # curr_batch_txt = open(os.path.join(source.split(source.split('/')[-1])[0], 'results', source.split('/')[-1] + '_SSP_EM/') + start_frame_name.replace('.jpg', '.txt'), 'a')
             # curr_batch_txt = open('/media/allenyljiang/Seagate_Backup_Plus_Drive/usr/local/VIBE-master/data/neurocomputing/results/mot20_test2/05_0019_SSP_EM/' + '05_0019_' + start_frame_name.replace('.jpg', '.txt'), 'a')
             # #######   整个轨迹txt写入  ########
             # '''
