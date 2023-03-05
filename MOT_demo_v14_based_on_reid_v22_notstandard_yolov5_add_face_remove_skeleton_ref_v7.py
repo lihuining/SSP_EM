@@ -143,7 +143,7 @@ median_filter_radius = 4
 num_samples_around_each_joint = 3
 maximum_possible_number = math.exp(10)
 average_sampling_density_hori_vert = 7
-bbox_confidence_threshold = 0.6 #5 # 0.45
+bbox_confidence_threshold = 0.1 #5 # 0.45
 head_bbox_confidence_threshold = 0.55 # 0.6 # 0.45
 temporal_length_thresh_inside_tracklet = 5
 tracklet_confidence_threshold = 0.6
@@ -1094,7 +1094,7 @@ def tracklet_collection(dataloader,img_size,outputs, info_imgs, ids, box_detecte
 
     box_detected_high = [box_detected[box_confidence_scores.index(x)] for x in box_confidence_scores if x >= bbox_confidence_threshold] # 0.4
     box_confidence_scores_high = [box_confidence_scores[box_confidence_scores.index(x)] for x in box_confidence_scores if x >= bbox_confidence_threshold]
-    min_conf = 0.1
+    min_conf = 0.05
     box_detected_second = [box_detected[box_confidence_scores.index(x)] for x in box_confidence_scores if x < bbox_confidence_threshold and x > min_conf]
     box_confidence_scores_second = [box_confidence_scores[box_confidence_scores.index(x)] for x in box_confidence_scores if x < bbox_confidence_threshold and x > min_conf]
         # if len(box_detected) > maximum_number_people:
@@ -3441,7 +3441,7 @@ def detect(opt,exp,args):
             time_end = time.time()
             # print('SSP computing time: ' + str(time_end - time_start))
             indefinite_node = [] # 表示第一次ssp当中不确定的点
-            error_tracks = [] # 第一次ssp当中出错的轨迹段
+            error_tracks = [] # 第一次ssp当中出错的轨迹段 or invalid ones
             split_each_track_SSP, split_each_track_valid_mask  = update_split_each_track_valid_mask(result)
             current_video_segment_predicted_tracks_bboxes_test_SSP,trajectory_node_dict,trajectory_idswitch_dict,trajectory_idswitch_reliability_dict,trajectory_segment_nodes_dict = track_processing(split_each_track_SSP, mapping_node_id_to_bbox, mapping_node_id_to_features,split_each_track_valid_mask)
             n_clusters = 0 # 最大轨迹数目，第二次低置信度点不增加轨迹数目只改变ssp结果
@@ -3459,6 +3459,7 @@ def detect(opt,exp,args):
 
                 elif len(trajectory_idswitch_reliability_dict[track_id]) == 1 and len(current_video_segment_predicted_tracks_bboxes_test_SSP[track_id])< tracklet_len:
                     if trajectory_idswitch_reliability_dict[track_id][0] == 1: # 对于只有一个valid_node的不加入进行修正
+                        error_tracks.append(track_id)
                         continue
                     indefinite_node += trajectory_node_dict[track_id]
                     n_clusters += 1
@@ -3496,7 +3497,7 @@ def detect(opt,exp,args):
             ##### 节点数目大于10的情况才能进行ssp #####
             Second_Flag = False
             result_second = tracking(mapping_node_id_to_bbox_second, mapping_edge_id_to_cost_second, tracklet_inner_cnt)
-            if 'Predicted tracks' in result_second[0] and len(indefinite_node) > 0:
+            if 'Predicted tracks' in result_second[0]: # 如果第二次ssp结果有效
             # if len(mapping_node_id_to_bbox_second) > 10:
                 split_each_track_SSP_second,split_each_track_valid_mask_second= update_split_each_track_valid_mask(result_second)
                 ##### 低置信度框 ###
@@ -3519,7 +3520,7 @@ def detect(opt,exp,args):
                     cv2.imwrite(os.path.join(source.split(source.split('/')[-1])[0], 'results_all', source.split('/')[-1] + '_vis_ssp_second/') + str(tracklet_inner_cnt) + '_' + frame_name, curr_img)
                 ## 进行轨迹合并 ##
                 # result = tracks_combination(error_tracks,result_second,mapping_node_id_to_bbox_second, mapping_node_id_to_features_second, source,tracklet_len,n_clusters)
-                result = tracks_combination(error_tracks,result,result_second,mapping_node_id_to_bbox, mapping_node_id_to_bbox_second,mapping_node_id_to_features,mapping_node_id_to_features_second,source,tracklet_len)
+                split_each_track = tracks_combination(bbox_confidence_threshold,error_tracks,result,result_second,mapping_node_id_to_bbox, mapping_node_id_to_bbox_second,mapping_node_id_to_features,mapping_node_id_to_features_second,source,tracklet_len)
                 ### 修改mapping_node_id_to_bbox_second以及mapping_node_id_to_features_second的key ##
                 new_key = (np.array(list(mapping_node_id_to_bbox_second.keys())) + max(list(mapping_node_id_to_bbox.keys()))).astype(np.int).tolist()
                 new_bbox_values = list(mapping_node_id_to_bbox_second.values())
@@ -3530,11 +3531,21 @@ def detect(opt,exp,args):
                 ### 对mapping_node_id_to_second 与 mapping_node_id_to_bbox 进行合并 ###
                 mapping_node_id_to_bbox.update(mapping_node_id_to_bbox_second)
                 mapping_node_id_to_features.update(mapping_node_id_to_features_second)
-                Second_Flag = True
-            # elif 'Predicted tracks' not in result_second[0] and len(indefinite_node) > 0:
 
-            split_each_track, _ = update_split_each_track_valid_mask(result)
-            if not Second_Flag:
+            elif 'Predicted tracks' not in result_second[0] and len(indefinite_node) > 0: # 第二次结果无效但是indefinite_node当中有需要修正的点
+                split_each_track = copy.deepcopy(split_each_track_SSP)
+                split_each_track_refined = {}
+                for track_id in error_tracks:
+                    # no idswitch remaind
+                    if len(trajectory_idswitch_reliability_dict[track_id]) == 1:
+                        continue
+                    # 最长的有效segment
+                    reliability_list = trajectory_segment_nodes_dict[track_id][np.argmax(trajectory_idswitch_reliability_dict[track_id])]
+                    for node_to_add in reliability_list:
+                        split_each_track_refined[track_id].append([str(2 * node_to_add - 1), str(2 * node_to_add)])
+                    split_each_track[track_id] = interpolate_to_obtain_traj(split_each_track_refined[track_id])
+            elif 'Predicted tracks' not in result_second[0] and len(indefinite_node) == 0:
+                split_each_track = copy.deepcopy(split_each_track_SSP)
                 [split_each_track.pop(track) for track in error_tracks]
                 # [valid_mask.pop(track) for track in error_tracks] # valid_mask 并没有使用
             current_video_segment_predicted_tracks, current_video_segment_predicted_tracks_confidence_score, current_video_segment_predicted_tracks_bboxes, current_video_segment_representative_frames,current_video_segment_predicted_tracks_bboxes_test,current_trajectory_similarity_dict,current_video_segment_all_traj_all_object_features = convert_track_to_stitch_format(split_each_track,mapping_node_id_to_bbox,mapping_node_id_to_features)
@@ -3862,7 +3873,7 @@ if __name__ == '__main__':
     exp_file = None
     exp = get_exp(exp_file,opt['name'])
     opt['cfg'] = r'/usr/local/lpn-pytorch-master/lpn-pytorch-master/experiments/coco/lpn/lpn101_256x192_gd256x2_gc.yaml'
-    opt['source'] = '/home/allenyljiang/Documents/Dataset/MOT20/train/MOT20-01/img1' # r'/media/allenyljiang/Seagate_Backup_Plus_Drive/usr/local/VIBE-master/data/neurocomputing/05_0019'
+    opt['source'] = '/home/allenyljiang/Documents/Dataset/MOT20/test/MOT20-06/img1' # r'/media/allenyljiang/Seagate_Backup_Plus_Drive/usr/local/VIBE-master/data/neurocomputing/05_0019'
     # opt['source'] = input_opt.source # r'/media/allenyljiang/Seagate_Backup_Plus_Drive/usr/local/VIBE-master/data/neurocomputing/05_0019'
     opt['modelDir'] = ''
     opt['logDir'] = ''

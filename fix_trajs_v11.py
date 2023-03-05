@@ -593,7 +593,7 @@ def tracks_combination(remained_tracks,result,result_second,mapping_node_id_to_b
                 segment_nodes = trajectory_segment_nodes_dict[track_id][i]
                 mean_conf = np.mean([mapping_node_id_to_bbox_second[node][1] for node in segment_nodes])
                 max_conf = np.max([mapping_node_id_to_bbox_second[node][1] for node in segment_nodes])
-                if max_conf > 0.6:
+                if max_conf > 0.1:
                     n_clusters += 1
                     indefinite_node += segment_nodes
                     indefinite_node_list.append(segment_nodes)
@@ -604,7 +604,7 @@ def tracks_combination(remained_tracks,result,result_second,mapping_node_id_to_b
                 continue
             mean_conf = np.mean([mapping_node_id_to_bbox_second[node][1] for node in segment_nodes])
             max_conf = np.max([mapping_node_id_to_bbox_second[node][1] for node in segment_nodes])
-            if max_conf > 0.6:
+            if max_conf > 0.1:
                 indefinite_node_list.append(segment_nodes)
                 indefinite_node += segment_nodes
     # cluster_tracks,convert the second result into

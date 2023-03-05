@@ -561,7 +561,7 @@ def compute_overlap_single_box(curr_img_boxes, next_img_boxes):# Order: top, bot
         corresponding_coefficient = 0.0
     return corresponding_coefficient
 
-def tracks_combination(remained_tracks,result,result_second,mapping_node_id_to_bbox, mapping_node_id_to_bbox_second,mapping_node_id_to_features,mapping_node_id_to_features_second,source,tracklet_len):
+def tracks_combination(bbox_confidence_threshold,remained_tracks,result,result_second,mapping_node_id_to_bbox, mapping_node_id_to_bbox_second,mapping_node_id_to_features,mapping_node_id_to_features_second,source,tracklet_len):
     '''
     进行第二次ssp结果与第一次ssp结果的合并
     n_clusters:最多可能的轨迹数目
@@ -593,7 +593,7 @@ def tracks_combination(remained_tracks,result,result_second,mapping_node_id_to_b
                 segment_nodes = trajectory_segment_nodes_dict[track_id][i]
                 mean_conf = np.mean([mapping_node_id_to_bbox_second[node][1] for node in segment_nodes])
                 max_conf = np.max([mapping_node_id_to_bbox_second[node][1] for node in segment_nodes])
-                if max_conf > 0.6:
+                if max_conf > bbox_confidence_threshold:
                     n_clusters += 1
                     indefinite_node += segment_nodes
                     indefinite_node_list.append(segment_nodes)
@@ -715,8 +715,8 @@ def tracks_combination(remained_tracks,result,result_second,mapping_node_id_to_b
                 delete_list.append(split_each_track_refined_key)
         # del split_each_track_refined[0] 没有必要
         [split_each_track_refined.pop(track) for track in delete_list]
-        result[0] = 'Predicted tracks' + '\n' + convert_dict_to_str(result, split_each_track_refined)
-        return result
+        # result[0] = 'Predicted tracks' + '\n' + convert_dict_to_str(result, split_each_track_refined)
+        return split_each_track_refined
     if len(cluster_tracks) == 1:
         return results_return(definite_track_list,cluster_tracks)
 
@@ -800,7 +800,7 @@ def tracks_combination(remained_tracks,result,result_second,mapping_node_id_to_b
             [frame_bbox1[frame][1][0] + frame_bbox1[frame][0][0] for frame in frame_bbox1]) / 2.0).tolist()  # 水平
         vertcenter_coordinates1 = (np.array(
             [frame_bbox1[frame][1][1] + frame_bbox1[frame][0][1] for frame in frame_bbox1]) / 2.0).tolist()  # 垂直
-        horicenter_fitter_coefficients = np.polyfit(frame_span1, horicenter_coordinates1, 1)
+        horicenter_fitter_coefficients = np.polyfit(frame_span1, horicenter_coordinates1, 1) # 如果有同一帧当中的多个node会报错
         vertcenter_fitter_coefficients = np.polyfit(frame_span1, vertcenter_coordinates1, 1)
         horicenter_fitter = np.poly1d(horicenter_fitter_coefficients)  # np.poly1d根据数组生成一个多项式
         vertcenter_fitter = np.poly1d(vertcenter_fitter_coefficients)
@@ -823,10 +823,10 @@ def tracks_combination(remained_tracks,result,result_second,mapping_node_id_to_b
             if id1 >= id2 or len(cluster_tracks[id1]) <2 or len(cluster_tracks[id2])<2:
                 continue
             track1 = cluster_tracks[id1]
-            frame_span1 = [int(mapping_node_id_to_bbox_second[node][2].split('.')[0]) for node in track1] # 自变量
+            frame_span1 = np.unique([int(mapping_node_id_to_bbox_second[node][2].split('.')[0]) for node in track1]).tolist() # 自变量
             frame_bbox1 = tracklet_regression(track1,frame_start,frame_end,frame_span1,mapping_node_id_to_bbox_second)
             track2 = cluster_tracks[id2]
-            frame_span2 = [int(mapping_node_id_to_bbox_second[node][2].split('.')[0]) for node in track2]
+            frame_span2 = np.unique([int(mapping_node_id_to_bbox_second[node][2].split('.')[0]) for node in track2]).tolist()
             frame_bbox2 = tracklet_regression(track2, frame_start, frame_end,frame_span2,mapping_node_id_to_bbox_second)
             tmp_span = frame_span1 + frame_span2
             ### regression ##
@@ -847,6 +847,7 @@ def tracks_combination(remained_tracks,result,result_second,mapping_node_id_to_b
                     # track[id] = dict(track1,**track2) # 关键字必须是str数据类型
                     cluster_tracks[id].update(cluster_tracks[remove_id])
                     remove_list.append(remove_id)
+                    continue
             elif set(frame_span1).issubset(set(frame_span2)) or set(frame_span2).issubset(set(frame_span1)):
                 # 是否需要删除多余
                 common_frames = set(frame_span1).intersection(set(frame_span2))
