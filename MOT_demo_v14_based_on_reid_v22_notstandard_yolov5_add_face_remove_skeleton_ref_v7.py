@@ -5,7 +5,7 @@ from __future__ import print_function
 import contextlib
 import io
 import tempfile
-
+from fast_reid.fast_reid_interfece import FastReIDInterface
 from loguru import logger
 import gc
 import tracemalloc
@@ -320,7 +320,12 @@ def make_parser():
         action="store_true",
         help="whether to save the inference result of image/video",
     )# action表示--save_result标志存在时赋值为"store_true"
-
+    #### reid parameters ####
+    parser.add_argument("--with-reid", dest="with_reid", default=True, action="store_true", help="use Re-ID flag.")
+    parser.add_argument("--fast-reid-config", dest="fast_reid_config", default=r"/home/allenyljiang/Documents/SSP_EM/fast_reid/configs/MOT17/sbs_S50.yml", type=str, help="reid config file path")
+    parser.add_argument("--fast-reid-weights", dest="fast_reid_weights", default=r"/home/allenyljiang/Documents/SSP_EM/pretrained/mot17_sbs_S50.pth", type=str, help="reid config file path")
+    parser.add_argument('--proximity_thresh', type=float, default=0.5, help='threshold for rejecting low overlap reid matches')
+    parser.add_argument('--appearance_thresh', type=float, default=0.25, help='threshold for rejecting low appearance similarity reid matches')
     # exp file
     parser.add_argument(
         "-f",# 短选项，使用-f/--exp_file均可
@@ -1393,8 +1398,8 @@ def compute_inter_person_similarity_worker(input_list, whether_use_iou_similarit
             # if curr_frame_dict['box_confidence_scores'][curr_frame_dict['bbox_list'].index(curr_person_bbox_coord)] > 1.0 or next_frame_dict['box_confidence_scores'][next_frame_dict['bbox_list'].index(next_person_bbox_coord)] > 1.0:
             #     person_to_person_matching_matrix[curr_frame_dict['bbox_list'].index(curr_person_bbox_coord), next_frame_dict['bbox_list'].index(next_person_bbox_coord)] = 1.0
             # else:
-            vector1 = all_people_features.data.numpy()[int(np.sum([len(x['bbox_list']) for x in tracklet_pose_collection[0:tracklet_inner_idx]]) + curr_frame_dict['bbox_list'].index(curr_person_bbox_coord))] # 当前帧bbox的特征向量
-            vector2 = all_people_features.data.numpy()[int(np.sum([len(x['bbox_list']) for x in tracklet_pose_collection[0:(tracklet_inner_idx + idx_stride_between_frame_pair)]]) + next_frame_dict['bbox_list'].index(next_person_bbox_coord))] # 下一帧bbox的特征向量
+            vector1 = all_people_features[int(np.sum([len(x['bbox_list']) for x in tracklet_pose_collection[0:tracklet_inner_idx]]) + curr_frame_dict['bbox_list'].index(curr_person_bbox_coord))] # 当前帧bbox的特征向量
+            vector2 = all_people_features[int(np.sum([len(x['bbox_list']) for x in tracklet_pose_collection[0:(tracklet_inner_idx + idx_stride_between_frame_pair)]]) + next_frame_dict['bbox_list'].index(next_person_bbox_coord))] # 下一帧bbox的特征向量
             person_to_person_matching_matrix[curr_frame_dict['bbox_list'].index(curr_person_bbox_coord), next_frame_dict['bbox_list'].index(next_person_bbox_coord)] = \
                 1.0 - min([np.dot(vector1, vector2)/(np.linalg.norm(vector1)*np.linalg.norm(vector2)), 1.0])
 
@@ -1798,7 +1803,7 @@ def stitching_tracklets(removed_global_id,node_matching_dict,tracklet_inner_cnt,
     #     result_dict_min[i+1] = min_index.tolist().index(i)+1 # 当前轨迹id与之前轨迹id对应关系  可能存在不对应的情况
     # 需要计算匹配的轨迹以及当前帧当中新出现的轨迹以及上一帧中没有匹配到的轨迹
     # 设置阈值
-    binary_similarity_matrix = (np.array(tracklets_similarity_matrix) < 0.6).astype(np.int32)
+    binary_similarity_matrix = (np.array(tracklets_similarity_matrix) < 0.7).astype(np.int32)
     if binary_similarity_matrix.sum(1).max() == 1 and binary_similarity_matrix.sum(0).max() == 1: #轨迹之间一一匹配
         matched_indices = np.stack(np.where(binary_similarity_matrix),axis=1)  # [:,0] 行索引  改为键值
         # result_dict
@@ -1814,7 +1819,7 @@ def stitching_tracklets(removed_global_id,node_matching_dict,tracklet_inner_cnt,
         # 对大于0.53的进行排除
         # print(tracklets_similarity_matrix[m[0],m[1]])
         mean_similarity_list.append(tracklets_similarity_matrix[m[0],m[1]])
-        if tracklets_similarity_matrix[m[0],m[1]] >= 0.6:  # 3 and 40,0.507属于同一个人的
+        if tracklets_similarity_matrix[m[0],m[1]] >= 0.7:  # 3 and 40,0.507属于同一个人的
             previous_unmatched_tracks.append(previous_tracks_id[m[0]])
             curr_unmatched_tracks.append(current_tracks_id[m[1]])
             continue
@@ -2055,23 +2060,9 @@ def convert_list_dict_to_np(tracklet_pose_collection_input, fixed_height, fixed_
     result_center_coords_array = np.zeros((curr_tracklet_bbox_cnt, 2)).astype('float32')
     curr_tracklet_bbox_cnt = 0
     for tracklet_pose_collection_input_item in tracklet_pose_collection_input:
-        curr_img = cv2.imread(tracklet_pose_collection_input_item['img_dir']) # cv2.imread(tracklet_pose_collection_input_item['img_dir'].split(tracklet_pose_collection_input_item['img_dir'].split('/')[-1])[0][:-1].split('_debug')[0]+'_HR'+'/'+tracklet_pose_collection_input_item['img_dir'].split('/')[-1]) # cv2.imread(tracklet_pose_collection_input_item['img_dir'])
+        curr_img = cv2.imread(tracklet_pose_collection_input_item['img_dir']) # cv2默认为BGR顺序
+        # cv2.imread(tracklet_pose_collection_input_item['img_dir'].split(tracklet_pose_collection_input_item['img_dir'].split('/')[-1])[0][:-1].split('_debug')[0]+'_HR'+'/'+tracklet_pose_collection_input_item['img_dir'].split('/')[-1]) # cv2.imread(tracklet_pose_collection_input_item['img_dir'])
         for bbox in tracklet_pose_collection_input_item['bbox_list']:
-            # time_start = time.time()
-            # if curr_img.shape[0] == 1080:
-            #     curr_img_resized = cv2.resize(curr_img[int(bbox[0][1]*2):int(bbox[1][1]*2), int(bbox[0][0]*2):int(bbox[1][0]*2), :], (int(fixed_height/(bbox[1][1]-bbox[0][1])*(bbox[1][0]-bbox[0][0])), fixed_height), interpolation=cv2.INTER_NEAREST)
-            # else:
-
-            # curr_img_resized = cv2.resize(curr_img[int(bbox[0][1]):int(bbox[1][1]), int(bbox[0][0]):int(bbox[1][0]), :], (int(fixed_height/(bbox[1][1]-bbox[0][1])*(bbox[1][0]-bbox[0][0])), fixed_height), interpolation=cv2.INTER_NEAREST)
-            # curr_img_resized = curr_img_resized[:, int((curr_img_resized.shape[1] - fixed_width)/2):int((curr_img_resized.shape[1] - fixed_width)/2)+fixed_width, :] if \
-            #                    curr_img_resized.shape[1] > fixed_width else np.pad(curr_img_resized, ((0,0), (int((fixed_width-curr_img_resized.shape[1])/2), fixed_width-curr_img_resized.shape[1]-int((fixed_width-curr_img_resized.shape[1])/2)), (0,0)), 'constant', constant_values=0)
-            # curr_img_resized = cv2.resize(curr_img[int(bbox[0][1]):int(bbox[1][1]), int(bbox[0][0]):int(bbox[1][0]), :], (fixed_width, fixed_height), interpolation=cv2.INTER_CUBIC)
-
-            # crop the regions containing current person
-            # if curr_img is None:
-            #     print(tracklet_pose_collection_input_item['img_dir'])
-            #     break
-            # curr_crop = curr_img[int(bbox[0][1]):int(bbox[1][1]), int(bbox[0][0]):int(bbox[1][0]), :]
             curr_crop = curr_img[max(0,int(bbox[0][1])):min(int(bbox[1][1]),curr_img.shape[0]), max(0,int(bbox[0][0])):min(int(bbox[1][0]),curr_img.shape[1]), :]
             if curr_crop.shape[0] > curr_crop.shape[1] * 2:
                 curr_img_resized = cv2.resize(curr_crop, (fixed_width, int(fixed_width / curr_crop.shape[1] * curr_crop.shape[0])), interpolation=cv2.INTER_AREA)
@@ -2081,15 +2072,6 @@ def convert_list_dict_to_np(tracklet_pose_collection_input, fixed_height, fixed_
                 curr_img_resized = curr_img_resized[:, int((curr_img_resized.shape[1] - fixed_width) / 2):int((curr_img_resized.shape[1] - fixed_width) / 2) + fixed_width, :]
             else:
                 curr_img_resized = cv2.resize(curr_crop, (fixed_width, fixed_height), interpolation=cv2.INTER_AREA)
-            # curr_img_resized (256,128,3)
-            # normalize
-            # curr_img_resized = curr_img_resized / 255.0
-            # norm_mean = [0.485, 0.456, 0.406]
-            # norm_std = [0.229, 0.224, 0.225]
-            # curr_img_resized[:, :, 0] = (curr_img_resized[:, :, 0] - norm_mean[0]) / norm_std[0]
-            # curr_img_resized[:, :, 1] = (curr_img_resized[:, :, 1] - norm_mean[1]) / norm_std[1]
-            # curr_img_resized[:, :, 2] = (curr_img_resized[:, :, 2] - norm_mean[2]) / norm_std[2]
-
             result_array[curr_tracklet_bbox_cnt, :, :, :] = np.transpose(curr_img_resized, (2,0,1))
             result_center_coords_array[curr_tracklet_bbox_cnt, 0] = (bbox[0][0] + bbox[1][0]) / 2 # 中心点x坐标
             result_center_coords_array[curr_tracklet_bbox_cnt, 1] = (bbox[0][1] + bbox[1][1]) / 2 # 中心点y坐标
@@ -2987,19 +2969,32 @@ def convert_track_to_stitch_format(split_each_track,mapping_node_id_to_bbox,mapp
         mapping_frameid_to_confidence_score.clear()
         mapping_frameid_to_object_features.clear()
     return curr_predicted_tracks,curr_predicted_tracks_confidence_score,curr_predicted_tracks_bboxes,curr_representative_frames,curr_predicted_tracks_bboxes_test,trajectory_similarity_dict,curr_video_segment_all_traj_all_object_features
-def mapping_data_preparation(tracklet_pose_collection,similarity_module,tracklet_inner_cnt,whether_use_reid_similarity_or_not):
+def mapping_data_preparation(encoder,tracklet_pose_collection,similarity_module,tracklet_inner_cnt,whether_use_reid_similarity_or_not):
     curr_tracklet_input_people, mapping_frameid_bbox_to_features, curr_tracklet_input_people_center_coords = convert_list_dict_to_np(tracklet_pose_collection, 256, 128)# 近10帧
+    features = np.zeros((0, 2048))
+    for tracklet_pose_collection_input_item in tracklet_pose_collection:
+        curr_img = cv2.imread(tracklet_pose_collection_input_item['img_dir']) # cv2默认为BGR顺序
+        dets = np.array(tracklet_pose_collection_input_item['bbox_list']).reshape(-1,4)
+        # dets = np.load('/home/allenyljiang/Documents/SSP_EM/variables/dets.npy')
+        if len(dets) == 0: # 注意second_mapping的时候不一定每个tracklets都有dets
+            continue
+        features_img = encoder.inference(curr_img,dets)
+        # dets = np.loadtxt('/home/allenyljiang/Documents/SSP_EM/variables/dets.txt',delimiter=',')
+        # features_saved = np.load('/home/allenyljiang/Documents/SSP_EM/variables/features.npy')
+        # print(np.array_equal(features_img,features_saved))
+        features = np.vstack((features,features_img)) # 数据类型：ndarray
     gc.collect()
     torch.cuda.empty_cache()
     # print(torch.cuda.memory_summary(device=0, abbreviated=False))
-    with torch.no_grad():
-        features = similarity_module(torch.from_numpy(curr_tracklet_input_people.astype('float32')).cuda()).data.cpu()
+    # with torch.no_grad():
+    #     features = similarity_module(torch.from_numpy(curr_tracklet_input_people.astype('float32')).cuda()).data.cpu() # 数据类型：Tensor
+    # 把features转化为numpy：features.data.numpy()
     # 计算所有input people的特征向量
     # Tensor(79,512)
     reid_end_time = time.time()
     # mapping_frameid_bbox_to_features 的值替换为bbox的特征
     for mapping_frameid_bbox_to_features_key in mapping_frameid_bbox_to_features.keys():
-        mapping_frameid_bbox_to_features[mapping_frameid_bbox_to_features_key] = features.data.numpy()[mapping_frameid_bbox_to_features[mapping_frameid_bbox_to_features_key], :].tolist()
+        mapping_frameid_bbox_to_features[mapping_frameid_bbox_to_features_key] = features[mapping_frameid_bbox_to_features[mapping_frameid_bbox_to_features_key], :].tolist()
     if dump_switch == 1:
         if not os.path.exists(os.path.join(dump_curr_video_name)):
             os.mkdir(os.path.join(dump_curr_video_name))
@@ -3263,6 +3258,7 @@ def detect(opt,exp,args):
 
     pose_transform = transforms.Compose([
         transforms.ToTensor(),
+        # IMAGENET 数据集的均值和方差
         transforms.Normalize(mean=[0.485, 0.456, 0.406],
                              std=[0.229, 0.224, 0.225]),
     ])
@@ -3273,7 +3269,8 @@ def detect(opt,exp,args):
         modelc = load_classifier(name='resnet101', n=2)  # initialize
         modelc.load_state_dict(torch.load('weights/resnet101.pt', map_location=device)['model'])  # load weights
         modelc.to(device).eval()
-
+    #### reid ####
+    encoder =  FastReIDInterface(args.fast_reid_config, args.fast_reid_weights, device)
 
     # Set Dataloader
     vid_path, vid_writer = None, None
@@ -3365,18 +3362,10 @@ def detect(opt,exp,args):
         # Apply NMS
         # pred = non_max_suppression(pred, opt['conf_thres'], opt['iou_thres'], classes=opt['classes'], agnostic=opt['agnostic_nms']) # (32,6)
         t2 = time_synchronized()
-
         # Process detections
         box_detected = []
         head_box_detected = []
         box_confidence_scores = []
-        head_box_confidence_scores = []
-        tracklet_pose_collection_tmp = {}
-        centers = []
-        scales = []
-        foreignmatter_box_detected = []
-        foreignmatter_box_confidence_scores = []
-
         ### Suppose the 6th and 7th sample in the current tracklet are actually more than temporal_length_thresh_inside_tracklet away in temporal axis,
         ### then we integrate the last 4 samples from the last tracklet and the 1st to 6th samples in the current tracklet into a tracklet
         # global tracklet_pose_collection_large_temporal_stride_buffer
@@ -3461,7 +3450,8 @@ def detect(opt,exp,args):
             # curr_tracklet_input_people: shape number of people in current batch of frames x 3 x 256 x 128
             # mapping_frameid_bbox_to_features: dict or lut(look up table can be implemented with C++) maps a string (frameid+'[(left, top), (right, bottom)]') to the idx of the bbox in current batch of frames, idx is integer
             # shape: number of people in current batch of frames x 2, 2 denotes horizontal and vertical coordinates of the center of each person, float
-            mapping_node_id_to_bbox,mapping_edge_id_to_cost,mapping_node_id_to_features = mapping_data_preparation(tracklet_pose_collection, similarity_module, tracklet_inner_cnt,True)
+
+            mapping_node_id_to_bbox,mapping_edge_id_to_cost,mapping_node_id_to_features = mapping_data_preparation(encoder,tracklet_pose_collection, similarity_module, tracklet_inner_cnt,True)
             ### 需要对第二次ssp当中的tracklet_pose_collection_second进行修正 ###
             ##################################################################################################################################
             ############################ organize graph and call #############################################################################
@@ -3528,7 +3518,7 @@ def detect(opt,exp,args):
                 tracklet_pose_collection_second[unique_frame_list.index(frame)]['bbox_list'].append(bbox)
                 tracklet_pose_collection_second[unique_frame_list.index(frame)]['box_confidence_scores'].append(conf)
             ##### second ssp #####
-            mapping_node_id_to_bbox_second,mapping_edge_id_to_cost_second,mapping_node_id_to_features_second = mapping_data_preparation(tracklet_pose_collection_second, similarity_module, tracklet_inner_cnt,False)
+            mapping_node_id_to_bbox_second,mapping_edge_id_to_cost_second,mapping_node_id_to_features_second = mapping_data_preparation(encoder,tracklet_pose_collection_second, similarity_module, tracklet_inner_cnt,False)
             ##### 节点数目大于10的情况才能进行ssp #####
             Second_Flag = False
             result_second = tracking(mapping_node_id_to_bbox_second, mapping_edge_id_to_cost_second, tracklet_inner_cnt)
