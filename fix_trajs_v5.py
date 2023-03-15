@@ -561,7 +561,7 @@ def compute_overlap_single_box(curr_img_boxes, next_img_boxes):# Order: top, bot
         corresponding_coefficient = 0.0
     return corresponding_coefficient
 
-def tracks_combination(bbox_confidence_threshold,remained_tracks,result,result_second,mapping_node_id_to_bbox, mapping_node_id_to_bbox_second,mapping_node_id_to_features,mapping_node_id_to_features_second,source,tracklet_len):
+def tracks_combination(remained_tracks,result,result_second,mapping_node_id_to_bbox, mapping_node_id_to_bbox_second,mapping_node_id_to_features,mapping_node_id_to_features_second,source,tracklet_len):
     '''
     进行第二次ssp结果与第一次ssp结果的合并
     n_clusters:最多可能的轨迹数目
@@ -581,10 +581,8 @@ def tracks_combination(bbox_confidence_threshold,remained_tracks,result,result_s
     ssp_test_second,trajectory_node_dict,trajectory_idswitch_dict,trajectory_idswitch_reliability_dict,trajectory_segment_nodes_dict = convert_track_to_stitch_format(split_each_track_second, mapping_node_id_to_bbox_second, mapping_node_id_to_features_second,split_each_track_valid_mask_second)
     ## 取出low-confidence当中有用的点 ##
     indefinite_node_list = [] # 以二维列表的形式存储第二次ssp的结果,[[]]
-    id_list = [] # 保存只保留一个batch这些tracklet在indefinite_node_list当中的id
     definite_node_list = []
     indefinite_node = []
-    temp_tracklets = []
     n_clusters = 0
     for track_id in trajectory_idswitch_reliability_dict:
         # for low confidence track, only idswitch track need revise
@@ -595,7 +593,7 @@ def tracks_combination(bbox_confidence_threshold,remained_tracks,result,result_s
                 segment_nodes = trajectory_segment_nodes_dict[track_id][i]
                 mean_conf = np.mean([mapping_node_id_to_bbox_second[node][1] for node in segment_nodes])
                 max_conf = np.max([mapping_node_id_to_bbox_second[node][1] for node in segment_nodes])
-                if max_conf > bbox_confidence_threshold:
+                if max_conf > 0.6:
                     n_clusters += 1
                     indefinite_node += segment_nodes
                     indefinite_node_list.append(segment_nodes)
@@ -606,15 +604,9 @@ def tracks_combination(bbox_confidence_threshold,remained_tracks,result,result_s
                 continue
             mean_conf = np.mean([mapping_node_id_to_bbox_second[node][1] for node in segment_nodes])
             max_conf = np.max([mapping_node_id_to_bbox_second[node][1] for node in segment_nodes])
-            if max_conf >= bbox_confidence_threshold:
+            if max_conf > 0.6:
                 indefinite_node_list.append(segment_nodes)
                 indefinite_node += segment_nodes
-            elif len(segment_nodes) >= 3:
-                id_list.append(len(indefinite_node_list))
-                indefinite_node_list.append(segment_nodes)
-                indefinite_node += segment_nodes
-                # temp_tracklets.append(track_id)
-                
     # cluster_tracks,convert the second result into
     # indefinite_node_list = np.unique(indefinite_node_list).tolist() # 之后就不是双层而是单层列表
     cluster_tracks = {} # keys: remained tracks and new track
@@ -623,14 +615,11 @@ def tracks_combination(bbox_confidence_threshold,remained_tracks,result,result_s
         for node in track:
             mapping_dict[node] = mapping_node_id_to_bbox_second[node]
         if idx <= len(remained_tracks)-1:
-            track_id = remained_tracks[idx]
             cluster_tracks[remained_tracks[idx]] = mapping_dict
         else:
             track_id = idx - (len(remained_tracks)-1) + list(current_video_segment_predicted_tracks_bboxes_test_SSP.keys())[-1] # 第一次ssp的keys
             # remained_tracks.append(track_id)
             cluster_tracks[track_id] = mapping_dict
-        if idx in id_list:
-            temp_tracklets.append(track_id)
 
     def my_distance(point1, point2):
         dimension = len(point1)
@@ -726,8 +715,8 @@ def tracks_combination(bbox_confidence_threshold,remained_tracks,result,result_s
                 delete_list.append(split_each_track_refined_key)
         # del split_each_track_refined[0] 没有必要
         [split_each_track_refined.pop(track) for track in delete_list]
-        # result[0] = 'Predicted tracks' + '\n' + convert_dict_to_str(result, split_each_track_refined)
-        return split_each_track_refined,temp_tracklets
+        result[0] = 'Predicted tracks' + '\n' + convert_dict_to_str(result, split_each_track_refined)
+        return result
     if len(cluster_tracks) == 1:
         return results_return(definite_track_list,cluster_tracks)
 
@@ -811,7 +800,7 @@ def tracks_combination(bbox_confidence_threshold,remained_tracks,result,result_s
             [frame_bbox1[frame][1][0] + frame_bbox1[frame][0][0] for frame in frame_bbox1]) / 2.0).tolist()  # 水平
         vertcenter_coordinates1 = (np.array(
             [frame_bbox1[frame][1][1] + frame_bbox1[frame][0][1] for frame in frame_bbox1]) / 2.0).tolist()  # 垂直
-        horicenter_fitter_coefficients = np.polyfit(frame_span1, horicenter_coordinates1, 1) # 如果有同一帧当中的多个node会报错
+        horicenter_fitter_coefficients = np.polyfit(frame_span1, horicenter_coordinates1, 1)
         vertcenter_fitter_coefficients = np.polyfit(frame_span1, vertcenter_coordinates1, 1)
         horicenter_fitter = np.poly1d(horicenter_fitter_coefficients)  # np.poly1d根据数组生成一个多项式
         vertcenter_fitter = np.poly1d(vertcenter_fitter_coefficients)
@@ -827,7 +816,6 @@ def tracks_combination(bbox_confidence_threshold,remained_tracks,result,result_s
         frame_bbox1 = dict(sorted(frame_bbox1.items(), key=operator.itemgetter(0)))  # 按照key值升序,从而使得计算iou的时候帧数是对应的
         return frame_bbox1
     ############ 处理clusters当中需要合并以及重复的track ############
-    dulplicate_dict = {}
     print('### processing cluster results ###')
     remove_list = []
     for id1 in cluster_tracks:
@@ -840,7 +828,7 @@ def tracks_combination(bbox_confidence_threshold,remained_tracks,result,result_s
             track2 = cluster_tracks[id2]
             frame_span2 = np.unique([int(mapping_node_id_to_bbox_second[node][2].split('.')[0]) for node in track2]).tolist()
             frame_bbox2 = tracklet_regression(track2, frame_start, frame_end,frame_span2,mapping_node_id_to_bbox_second)
-            tmp_span = frame_span1 + frame_span2
+            tmp_span = np.unique(frame_span1 + frame_span2).tolist()
             ### regression ##
             ### 从最小的frame到最大的frame计算相似度 ###
             tracklet1 = np.array([frame_bbox1[frame] for frame in frame_bbox1])
@@ -848,8 +836,7 @@ def tracks_combination(bbox_confidence_threshold,remained_tracks,result,result_s
             tracklet_ious_matrix  = compute_iou_between_bbox_list(tracklet1.reshape(-1, 2, 2), tracklet2.reshape(-1, 2, 2))
             # tracklet_overlap_matrix = compute_overlap_between_bbox_list(tracklet1.reshape(-1, 2, 2), tracklet2.reshape(-1, 2, 2))
             ### 判断是否有相同帧 ###
-            ### 相同帧的数目限制 ###
-            if len(set(frame_span1+frame_span2)) >= len(frame_span1) + len(frame_span2):
+            if len(set(frame_span1+frame_span2)) >= len(frame_span1) + len(frame_span2) - 2: # the overlap is less than 2 frames
                 # 是否可以合并
                 ious = np.diagonal(tracklet_ious_matrix)
                 print('track{0} and track{1} iou is {2}'.format(id1,id2,np.mean(ious[frame_span.index(min(tmp_span)):frame_span.index(max(tmp_span))+1])))
@@ -858,9 +845,8 @@ def tracks_combination(bbox_confidence_threshold,remained_tracks,result,result_s
                     id = min(id1,id2)
                     remove_id = max(id1,id2)
                     # track[id] = dict(track1,**track2) # 关键字必须是str数据类型
-                    cluster_tracks[id].update(cluster_tracks[remove_id])
+                    cluster_tracks[id].update(cluster_tracks[remove_id]) # 会有同一帧当中的node
                     remove_list.append(remove_id)
-                    continue
             elif set(frame_span1).issubset(set(frame_span2)) or set(frame_span2).issubset(set(frame_span1)):
                 # 是否需要删除多余
                 common_frames = set(frame_span1).intersection(set(frame_span2))
@@ -900,15 +886,10 @@ def tracks_combination(bbox_confidence_threshold,remained_tracks,result,result_s
                 tracklet_bbox2 = np.array([frame_bbox2[frame] for frame in common_frames])
                 tracklet_overlap_matrix  = compute_overlap_between_bbox_list(tracklet_bbox1.reshape(-1, 2, 2), tracklet_bbox2.reshape(-1, 2, 2))
                 overlap = np.diagonal(tracklet_overlap_matrix)
-                if np.mean(overlap) > 0.9 and np.mean(overlap) < 1: # 0.66
-                    dulplicate_dict[id1] = id2 # 加入到dulplicated_dict
-                    temp_tracklets.append(id1)
-                    temp_tracklets.append(id2)
-                elif np.mean(overlap) == 1:
+                if np.mean(overlap) > 0.9: # 0.66
                     print('track{0} and track{1} overlap is {2}'.format(id1, id2, np.mean(overlap)))
                     id = id1 if len(frame_span1) < len(frame_span2) else id2 # id表示取其中frame_span更短的那一个
                     dulplicate_track_list.append(id) # 可能是split当中的轨迹
-                    
     dulplicate_track_list = np.unique(dulplicate_track_list).tolist() # 需要唯一
     print('dulplicate_track_list',dulplicate_track_list)
     [cluster_tracks.pop(trackid) for trackid in dulplicate_track_list if trackid in cluster_tracks]
