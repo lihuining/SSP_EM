@@ -1793,6 +1793,40 @@ def stitching_tracklets(node_matching_dict,tracklet_inner_cnt, current_video_seg
     for track_id in current_video_segment_predicted_tracks_bboxes:
         if (track_id not in np.array(current_tracks_id)[matched_indices[:,1]]):
             curr_unmatched_tracks.append(track_id)
+    ## curr_unmatched与其余curr_tracks计算相似度来判断
+    dulplicate_track_list = []
+    definite_track_list = list(set(current_tracks_id) - set(curr_unmatched_tracks)) # curr当中匹配上的tracks
+    # 需要选择两者当中不重合部分进行比较
+    for id1 in definite_track_list:
+        for id2 in curr_unmatched_tracks:
+            if len(current_video_segment_predicted_tracks_bboxes[id1]) < 2 or len(current_video_segment_predicted_tracks_bboxes[id2]) < 2:  # 无法进行回归的情况直接跳过
+                continue
+            ### 计算common frames当中的overlap ###
+            track1 = current_video_segment_predicted_tracks_bboxes[id1]
+            track2 = current_video_segment_predicted_tracks_bboxes[id2]
+            frame_span1 = [int(frame.split('.')[0]) for frame in track1]
+            frame_span2 = [int(frame.split('.')[0]) for frame in track2]
+            frame_bbox1 = {int(frame.split('.')[0]):track1[frame] for frame in track1}
+            frame_bbox2 = {int(frame.split('.')[0]):track2[frame] for frame in track2}
+            ## 如果两个集合为包含关系 ##
+            if set(frame_span1).issubset(set(frame_span2)) or set(frame_span2).issubset(set(frame_span1)):
+                common_frames = set(frame_span1).intersection(set(frame_span2))  #
+                tracklet_bbox1 = np.array([frame_bbox1[frame] for frame in common_frames])
+                tracklet_bbox2 = np.array([frame_bbox2[frame] for frame in common_frames])
+                tracklet_overlap_matrix = compute_overlap_between_bbox_list(tracklet_bbox1.reshape(-1, 2, 2),tracklet_bbox2.reshape(-1, 2, 2))
+                overlap = np.diagonal(tracklet_overlap_matrix)
+                if np.mean(overlap) > 0.9:  # 0.66
+                    print('track{0} and track{1} overlap is {2}'.format(id1, id2, np.mean(overlap)))
+                    dulplicate_track_list.append(id2)  # 可能是split当中的轨迹
+    dulplicate_track_list = np.unique(dulplicate_track_list).tolist()  # 需要唯一
+    print('dulplicate_track_list', dulplicate_track_list)
+    # for list need to use remove, for dict need to use pop
+    [curr_unmatched_tracks.remove(trackid) for trackid in dulplicate_track_list if trackid in curr_unmatched_tracks]
+    [current_video_segment_predicted_tracks_bboxes.pop(trackid) for trackid in dulplicate_track_list if trackid in current_video_segment_predicted_tracks_bboxes]
+    [current_video_segment_predicted_tracks.pop(trackid) for trackid in dulplicate_track_list if trackid in current_video_segment_predicted_tracks]
+
+
+
 
     # new_track_list = []
     # terminate_track_list = []
@@ -3459,6 +3493,11 @@ def detect(opt,exp,args):
 
                 elif len(trajectory_idswitch_reliability_dict[track_id]) == 1 and len(current_video_segment_predicted_tracks_bboxes_test_SSP[track_id])< tracklet_len:
                     # if trajectory_idswitch_reliability_dict[track_id][0] == 1: # 对于只有一个valid_node的不加入进行修正
+                    #     continue
+                    # curr_track = current_video_segment_predicted_tracks_bboxes_test_SSP[track_id]
+                    # (left,top),(right,bottom) = curr_track[min(list(curr_track.keys()))][1]
+                    # flag = right >= border_x_max or left <= border_x_min or bottom >= boder_y_max or top <= border_y_min
+                    # if flag: # 对于出现在边缘的不用进行修正
                     #     continue
                     indefinite_node += trajectory_node_dict[track_id]
                     n_clusters += 1

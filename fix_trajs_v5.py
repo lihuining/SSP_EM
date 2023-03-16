@@ -865,37 +865,36 @@ def tracks_combination(remained_tracks,result,result_second,mapping_node_id_to_b
     ############ 对K-means当中与split_each_track当中重合度较高的轨迹进行合并 #########
     print('### processing cluster results and original ssp###')
     ### 此处使用overlap进行计算并且删除掉轨迹更短的那一条 ###
-    dulplicate_track_list = []
-
-    # 需要选择两者当中不重合部分进行比较
-    for id1 in list(definite_track_list):
-        for id2 in cluster_tracks:
-            if id1 == id2 or len(current_video_segment_predicted_tracks_bboxes_test_SSP[id1]) <2 or len(cluster_tracks[id2])<2: # 无法进行回归的情况直接跳过
-                continue
-            ### 计算common frames当中的overlap ###
-            track1 = current_video_segment_predicted_tracks_bboxes_test_SSP[id1]
-            track2 = cluster_tracks[id2]
-            frame_span1 = [int(mapping_node_id_to_bbox[node][2].split('.')[0]) for node in track1] # 自变量
-            frame_span2 = [int(mapping_node_id_to_bbox_second[node][2].split('.')[0]) for node in track2]
-            frame_bbox1 = {int(mapping_node_id_to_bbox[node][2].split('.')[0]): mapping_node_id_to_bbox[node][0] for node in track1}
-            frame_bbox2 = {int(mapping_node_id_to_bbox_second[node][2].split('.')[0]): mapping_node_id_to_bbox_second[node][0] for node in track2}
-            ## 如果两个集合为包含关系 ##
-            if set(frame_span1).issubset(set(frame_span2)) or set(frame_span2).issubset(set(frame_span1)):
-                common_frames = set(frame_span1).intersection(set(frame_span2)) # 
-                tracklet_bbox1 = np.array([frame_bbox1[frame] for frame in common_frames])
-                tracklet_bbox2 = np.array([frame_bbox2[frame] for frame in common_frames])
-                tracklet_overlap_matrix  = compute_overlap_between_bbox_list(tracklet_bbox1.reshape(-1, 2, 2), tracklet_bbox2.reshape(-1, 2, 2))
-                overlap = np.diagonal(tracklet_overlap_matrix)
-                if np.mean(overlap) > 0.9: # 0.66
-                    print('track{0} and track{1} overlap is {2}'.format(id1, id2, np.mean(overlap)))
-                    id = id1 if len(frame_span1) < len(frame_span2) else id2 # id表示取其中frame_span更短的那一个
-                    dulplicate_track_list.append(id) # 可能是split当中的轨迹
-    dulplicate_track_list = np.unique(dulplicate_track_list).tolist() # 需要唯一
-    print('dulplicate_track_list',dulplicate_track_list)
-    [cluster_tracks.pop(trackid) for trackid in dulplicate_track_list if trackid in cluster_tracks]
-    [split_each_track.pop(trackid) for trackid in dulplicate_track_list if trackid in split_each_track] # 删除split_each_track会导致后面的结果出问题
+    # dulplicate_track_list = []
+    # # 需要选择两者当中不重合部分进行比较
+    # for id1 in list(definite_track_list):
+    #     for id2 in cluster_tracks:
+    #         if id1 == id2 or len(current_video_segment_predicted_tracks_bboxes_test_SSP[id1]) <2 or len(cluster_tracks[id2])<2: # 无法进行回归的情况直接跳过
+    #             continue
+    #         ### 计算common frames当中的overlap ###
+    #         track1 = current_video_segment_predicted_tracks_bboxes_test_SSP[id1]
+    #         track2 = cluster_tracks[id2]
+    #         frame_span1 = [int(mapping_node_id_to_bbox[node][2].split('.')[0]) for node in track1] # 自变量
+    #         frame_span2 = [int(mapping_node_id_to_bbox_second[node][2].split('.')[0]) for node in track2]
+    #         frame_bbox1 = {int(mapping_node_id_to_bbox[node][2].split('.')[0]): mapping_node_id_to_bbox[node][0] for node in track1}
+    #         frame_bbox2 = {int(mapping_node_id_to_bbox_second[node][2].split('.')[0]): mapping_node_id_to_bbox_second[node][0] for node in track2}
+    #         ## 如果两个集合为包含关系 ##
+    #         if set(frame_span1).issubset(set(frame_span2)) or set(frame_span2).issubset(set(frame_span1)):
+    #             common_frames = set(frame_span1).intersection(set(frame_span2)) #
+    #             tracklet_bbox1 = np.array([frame_bbox1[frame] for frame in common_frames])
+    #             tracklet_bbox2 = np.array([frame_bbox2[frame] for frame in common_frames])
+    #             tracklet_overlap_matrix  = compute_overlap_between_bbox_list(tracklet_bbox1.reshape(-1, 2, 2), tracklet_bbox2.reshape(-1, 2, 2))
+    #             overlap = np.diagonal(tracklet_overlap_matrix)
+    #             if np.mean(overlap) > 0.9: # 0.66
+    #                 print('track{0} and track{1} overlap is {2}'.format(id1, id2, np.mean(overlap)))
+    #                 id = id1 if len(frame_span1) < len(frame_span2) else id2 # id表示取其中frame_span更短的那一个
+    #                 dulplicate_track_list.append(id) # 可能是split当中的轨迹
+    # dulplicate_track_list = np.unique(dulplicate_track_list).tolist() # 需要唯一
+    # print('dulplicate_track_list',dulplicate_track_list)
+    # [cluster_tracks.pop(trackid) for trackid in dulplicate_track_list if trackid in cluster_tracks]
+    # [split_each_track.pop(trackid) for trackid in dulplicate_track_list if trackid in split_each_track] # 删除split_each_track会导致后面的结果出问题
+    #
     show_fix_clusters(cluster_tracks,mapping_node_id_to_bbox_second)
-
     return results_return(definite_track_list,cluster_tracks)
     # ##### 删除掉长度为1的轨迹并且进行结果的整理返回 #####
     # split_each_track_refined = {}
