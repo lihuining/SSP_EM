@@ -1089,7 +1089,7 @@ def cluster_fix(result, result_second,mapping_edge_id_to_cost, mapping_node_id_t
                         mapping_node_id_to_bbox[bboxid][0][1][1])
                     # cv2.putText(curr_img, str(getDictKey_1(cluster_tracks,bboxid)), (int((left+right)/2), int((top+bottom)/2)), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 255), 3)
                     cv2.putText(curr_img, str(getDictKey_1(cluster_tracks, bboxid)), (left, top),
-                                cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 255), 3)
+                                cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 3)
                     cv2.putText(curr_img,str(round(mapping_node_id_to_bbox[bboxid][1],2)), (right, bottom),
                                 cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 3) # 字体大小为1
                     cv2.rectangle(curr_img, (left, top), (right, bottom), (0, 255, 0), 3)
