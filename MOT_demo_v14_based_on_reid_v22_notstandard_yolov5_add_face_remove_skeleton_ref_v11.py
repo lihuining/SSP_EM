@@ -266,7 +266,7 @@ def track_processing(split_each_track,mapping_node_id_to_bbox,mapping_node_id_to
             #
             if split_each_track_valid_mask[track_id][idx] == 1:
                 trajectory_idswitch_reliability += 1
-            trajectory_segment.append(int(node_id))
+                trajectory_segment.append(int(node_id))
             bbox_pre = copy.deepcopy(bbox)
 
             confidence_score = mapping_node_id_to_bbox[node_id][1]
@@ -1662,10 +1662,6 @@ def stitching_tracklets(node_matching_dict,tracklet_inner_cnt, current_video_seg
     if max([max(previous_video_segment_predicted_tracks[x].keys()) for x in previous_video_segment_predicted_tracks.keys()]) - \
         min([max(previous_video_segment_predicted_tracks[x].keys()) for x in previous_video_segment_predicted_tracks.keys()]) > large_temporal_stride_thresh: #100
         whether_use_consistency_in_traj = False
-    # for previous_tracklet_id in previous_video_segment_predicted_tracks_bboxes_test:
-    # for current_video_segment_predicted_tracks_bboxes_test
-    ###
-
     for previous_tracklet_id in previous_video_segment_predicted_tracks_bboxes:
         # ### 终止该条轨迹，不进行reid 匹配 ###
         # if previous_tracklet_id in terminate_track_list:
@@ -3455,6 +3451,7 @@ def detect(opt,exp,args):
                         indefinite_node += segment_nodes
 
                 elif len(trajectory_idswitch_reliability_dict[track_id]) == 1 and len(current_video_segment_predicted_tracks_bboxes_test_SSP[track_id])< tracklet_len:
+
                     indefinite_node += trajectory_node_dict[track_id]
                     n_clusters += 1
                     error_tracks.append(track_id)

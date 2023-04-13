@@ -137,7 +137,7 @@ median_filter_radius = 4
 num_samples_around_each_joint = 3
 maximum_possible_number = math.exp(10)
 average_sampling_density_hori_vert = 7
-bbox_confidence_threshold = 0.0 #5 # 0.45
+bbox_confidence_threshold = 0.1 #5 # 0.45
 head_bbox_confidence_threshold = 0.55 # 0.6 # 0.45
 temporal_length_thresh_inside_tracklet = 5
 tracklet_confidence_threshold = 0.6
@@ -206,7 +206,7 @@ def make_parser():
     parser.add_argument(
         "-f",
         "--exp_file",
-        default='exps/example/mot/yolox_x_mix_mot20_ch.py.py',
+        default='exps/example/shanghai/yolox_x_shanghai_ch.py',
         type=str,
         help="pls input your expriment description file",
     )
@@ -751,8 +751,8 @@ def tracklet_collection(dataloader,img_size,outputs, info_imgs, ids, box_detecte
     if len(box_detected) == 0:
         tracklet_pose_collection.append([])
         return tracklet_pose_collection
-    # path = os.path.join(source,info_imgs[4][0].split('/')[-1])  # info_imgs[4] 是一个list
-    path = os.path.join('/home/allenyljiang/Documents/Dataset/MOT20/test/',info_imgs[4][0])  # info_imgs[4] 是一个list
+    path = os.path.join(source,info_imgs[4][0].split('/')[-1])  # info_imgs[4] 是一个list
+    # path = os.path.join('/home/allenyljiang/Documents/Dataset/MOT20/test/',info_imgs[4][0])  # info_imgs[4] 是一个list
     tracklet_pose_collection_tmp = {}
     tracklet_pose_collection_tmp['bbox_list'] = box_detected
     tracklet_pose_collection_tmp['box_confidence_scores'] = box_confidence_scores
@@ -769,8 +769,8 @@ def tracklet_collection(dataloader,img_size,outputs, info_imgs, ids, box_detecte
     det_cnt_frame_list.append(len(box_detected))
     det_cnt += len(box_detected)
     for idx,bbox in enumerate(box_detected):
-        if round(box_confidence_scores[idx],2) > 0.6:
-            continue
+        # if round(box_confidence_scores[idx],2) > 0.6:
+        #     continue
         cv2.rectangle(img,(int(bbox[0][0]),int(bbox[0][1])),(int(bbox[1][0]),int(bbox[1][1])),(0,255,0),2)
         cv2.putText(img,str(round(box_confidence_scores[idx],2)),(int((int(bbox[0][0])+int(bbox[1][0]))/2),int((int(bbox[0][1])+int(bbox[1][1]))/2)),cv2.FONT_HERSHEY_SIMPLEX,1,(0,0,255),2)
     cv2.imwrite(dstfile,img)
@@ -2711,7 +2711,7 @@ def parse_opt():
     parser = argparse.ArgumentParser()#　照片要jpg格式
     # /usr/local/SSP_EM/05_0019
     # /home/allenyljiang/Documents/Dataset/MOT20/train/MOT20-01/img1
-    parser.add_argument('--source', type=str, default='/home/allenyljiang/Documents/Dataset/MOT20/test/MOT20-06/img1', help='file/dir/URL/glob, 0 for webcam')#/media/allenyljiang/Seagate_Backup_Plus_Drive/usr/local/VIBE-master/data/neurocomputing/05_0019
+    parser.add_argument('--source', type=str, default='/home/allenyljiang/Documents/Dataset/shanghai/test/08_002', help='file/dir/URL/glob, 0 for webcam')#/media/allenyljiang/Seagate_Backup_Plus_Drive/usr/local/VIBE-master/data/neurocomputing/05_0019
 
     opt = parser.parse_args()
     return opt

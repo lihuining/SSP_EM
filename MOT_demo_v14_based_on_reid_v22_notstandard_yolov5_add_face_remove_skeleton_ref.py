@@ -816,7 +816,6 @@ def stitching_tracklets(tracklet_inner_cnt, current_video_segment_predicted_trac
     predicted_bbox_based_on_historical_traj = {}
 
     ## delete the people who disappear from sides of images
-
     whether_use_consistency_in_traj = True
     # max([max(previous_video_segment_predicted_tracks[x].keys()) for x in previous_video_segment_predicted_tracks.keys()]):上一个batch最大的frameid
     # [max(previous_video_segment_predicted_tracks[x].keys()) for x in previous_video_segment_predicted_tracks.keys()]表示所有轨迹最后一帧的frameid

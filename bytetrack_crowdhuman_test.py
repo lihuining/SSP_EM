@@ -186,7 +186,7 @@ def make_parser():
     parser.add_argument("-n", "--name", type=str, default=None, help="model name")
 
     parser.add_argument(
-        "--path", default="/home/allenyljiang/Documents/Dataset/MOT20/train/MOT20-02/img1", help="path to images or video"
+        "--path", default="/home/allenyljiang/Documents/Dataset/shanghai/test/08_002", help="path to images or video"
     )
     parser.add_argument("--camid", type=int, default=0, help="webcam demo camera id")
     parser.add_argument(
@@ -199,7 +199,7 @@ def make_parser():
     parser.add_argument(
         "-f",# 短选项，使用-f/--exp_file均可
         "--exp_file",
-        default='/usr/local/SSP_EM/exps/example/mot/yolox_x_mix_mot20_ch.py',
+        default='/home/allenyljiang/Documents/SSP_EM/exps/example/shanghai/yolox_x_shanghai_ch.py',
         type=str,
         help="pls input your expriment description file",
     )
@@ -2526,7 +2526,7 @@ def parse_opt():
     parser = argparse.ArgumentParser()#　照片要jpg格式
     # /usr/local/SSP_EM/05_0019
     # /home/allenyljiang/Documents/Dataset/MOT20/train/MOT20-01/img1
-    parser.add_argument('--source', type=str, default='/home/allenyljiang/Documents/Dataset/MOT20/test/MOT20-07/img1', help='file/dir/URL/glob, 0 for webcam')#/media/allenyljiang/Seagate_Backup_Plus_Drive/usr/local/VIBE-master/data/neurocomputing/05_0019
+    parser.add_argument('--source', type=str, default='/home/allenyljiang/Documents/Dataset/MOT20/train/MOT20-01/img1', help='file/dir/URL/glob, 0 for webcam')#/media/allenyljiang/Seagate_Backup_Plus_Drive/usr/local/VIBE-master/data/neurocomputing/05_0019
 
     opt = parser.parse_args()
     return opt

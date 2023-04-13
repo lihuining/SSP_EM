@@ -114,12 +114,13 @@ def dti(txt_path, save_path, n_min=25, n_dti=20):
 
 
 if __name__ == '__main__':
-    data_root = '/home/allenyljiang/Documents/Dataset/MOT20/train'
-    txt_path = '/home/allenyljiang/Documents/Dataset/MOT20/results/MOT20-08_4.txt'
-    save_path = '/home/allenyljiang/Documents/Dataset/MOT20/results/dti'
+    data_root = '/home/allenyljiang/Documents/Dataset/MOT20/train/MOT20-01/results_all/dti'
+    txt_path = '/home/allenyljiang/Documents/Dataset/MOT20/train/MOT20-01/results_all/MOT20-01.txt'
+    save_path = '/home/allenyljiang/Documents/Dataset/MOT20/train/MOT20-01/results_all/dti'
 
     mkdir_if_missing(save_path)
-    dti(txt_path, save_path, n_min=10, n_dti=50)
+    dti(txt_path, save_path, n_min=20, n_dti=50)
+    # dti(txt_path, save_path, n_min=10, n_dti=50)
     # print('Before DTI: ')
     # eval_mota(data_root, txt_path)
     # print('After DTI:')

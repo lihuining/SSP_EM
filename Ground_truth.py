@@ -21,7 +21,7 @@ classes = np.unique(seq_tracks[:,-2]) # the considered classes in gt
 # seq_tracks_valid_part3 = seq_tracks[seq_tracks[:,-2] == 7,:] # static_person
 # seq_tracks = np.concatenate((seq_tracks_valid_part1,seq_tracks_valid_part2,seq_tracks_valid_part3),axis=0)
 
-dst_path = os.path.join('/home/allenyljiang/Documents/Dataset/MOT20/train',folder,'gt/vis_ratio')
+dst_path = os.path.join('/home/allenyljiang/Documents/Dataset/MOT20/train',folder,'gt/vis')
 if not os.path.exists(dst_path):
     os.makedirs(dst_path)
 
@@ -35,6 +35,7 @@ for frame in range(int(seq_tracks[:,0].max())):
     frame += 1
     track_id = seq_tracks[seq_tracks[:,0] == frame,1] # 轨迹id
     dets = seq_tracks[seq_tracks[:,0] == frame,2:6] # 检测框
+    visibility = seq_tracks[seq_tracks[:,0] == frame,-1] # visibility
     dets[:,2:4]+=dets[:,0:2]
     ## 对框进行缩放 ## 
     center_x, center_y = (dets[:,0] + dets[:,2]) / 2, (dets[:,1] + dets[:,3]) / 2
@@ -52,8 +53,8 @@ for frame in range(int(seq_tracks[:,0].max())):
         # left,top = int(dets[i,0]),int(dets[i,1])
         # cv2.putText(img, str(int(track_id[i])), (left, top), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 255, 0), 1)
         # cv2.rectangle(img,(int(dets[i,0]),int(dets[i,1])),(int(dets[i,2]),int(dets[i,3])),(0,255,0),1)
-        cv2.rectangle(img,(int(left[i]),int(top[i])),(int(right[i]),int(bottom[i])),(0,255,0),1)
-
+        cv2.rectangle(img,(int(left[i]),int(top[i])),(int(right[i]),int(bottom[i])),(0,255,0),2)
+        cv2.putText(img,str(round(visibility[i],2)), (int(left[i]),int(top[i])), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
         # ax1.imshow(img)
         # plt.imshow(img)
         # plt.show(img)
