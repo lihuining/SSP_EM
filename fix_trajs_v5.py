@@ -679,7 +679,7 @@ def tracks_combination(remained_tracks,result,result_second,mapping_node_id_to_b
         return tracks
 
     # kmeans_visualizer.show_clusters(sample, clusters, final_centers)
-    show_clusters(cluster_tracks,mapping_node_id_to_bbox_second)
+    # show_clusters(cluster_tracks,mapping_node_id_to_bbox_second)
 
     definite_track_list = set(split_each_track.keys()) - set(cluster_tracks.keys()) # definite track in first ssp
     def results_return(definite_track_list,cluster_tracks):
@@ -894,7 +894,7 @@ def tracks_combination(remained_tracks,result,result_second,mapping_node_id_to_b
     print('dulplicate_track_list',dulplicate_track_list)
     [cluster_tracks.pop(trackid) for trackid in dulplicate_track_list if trackid in cluster_tracks]
     [split_each_track.pop(trackid) for trackid in dulplicate_track_list if trackid in split_each_track] # 删除split_each_track会导致后面的结果出问题
-    show_fix_clusters(cluster_tracks,mapping_node_id_to_bbox_second)
+    # show_fix_clusters(cluster_tracks,mapping_node_id_to_bbox_second)
 
     return results_return(definite_track_list,cluster_tracks)
     # ##### 删除掉长度为1的轨迹并且进行结果的整理返回 #####
@@ -1124,7 +1124,7 @@ def cluster_fix(result, result_second,mapping_edge_id_to_cost, mapping_node_id_t
         return tracks
 
     # kmeans_visualizer.show_clusters(sample, clusters, final_centers)
-    show_clusters(cluster_tracks)
+    # show_clusters(cluster_tracks)
 
     definite_track_list = set(split_each_track.keys()) - set(cluster_tracks.keys())
     cluster_all_keys = set(cluster_tracks.keys())
