@@ -20,7 +20,7 @@ from sklearn.decomposition import PCA
 import cv2
 import time
 import random
-from MOT_demo_v14_based_on_reid_v22_notstandard_yolov5_add_face_remove_skeleton_ref_v5 import *
+from MOT_demo_v14_based_on_reid_v22_notstandard_yolov5_add_face_remove_skeleton_ref_v7 import *
 from contextlib import ExitStack
 from torch.quasirandom import SobolEngine
 import gpytorch
@@ -561,7 +561,7 @@ def compute_overlap_single_box(curr_img_boxes, next_img_boxes):# Order: top, bot
         corresponding_coefficient = 0.0
     return corresponding_coefficient
 
-def tracks_combination(remained_tracks,result,result_second,mapping_node_id_to_bbox, mapping_node_id_to_bbox_second,mapping_node_id_to_features,mapping_node_id_to_features_second,source,tracklet_len):
+def tracks_combination(tracklet_inner_cnt,remained_tracks,result,result_second,mapping_node_id_to_bbox, mapping_node_id_to_bbox_second,mapping_node_id_to_features,mapping_node_id_to_features_second,source,tracklet_len):
     '''
     进行第二次ssp结果与第一次ssp结果的合并
     n_clusters:最多可能的轨迹数目
@@ -654,7 +654,7 @@ def tracks_combination(remained_tracks,result,result_second,mapping_node_id_to_b
                 os.makedirs(os.path.join(source.split(source.split('/')[-1])[0], 'results_all',
                                          source.split('/')[-1] + '_cluster_results/'))
             cv2.imwrite(os.path.join(source.split(source.split('/')[-1])[0], 'results_all',
-                                     source.split('/')[-1] + '_cluster_results/') + frame_name, curr_img)
+                                     source.split('/')[-1] + '_cluster_results/') + str(tracklet_inner_cnt) + '_'+frame_name, curr_img)
     def show_fix_clusters(tracks,mapping_node_id_to_bbox): # 显示clusters处理之后的结果
         cluster_frame_list = sorted(np.unique([mapping_node_id_to_bbox[x][2] for x in mapping_node_id_to_bbox]))
         for frame_name in cluster_frame_list:
@@ -675,11 +675,11 @@ def tracks_combination(remained_tracks,result,result_second,mapping_node_id_to_b
                 os.makedirs(os.path.join(source.split(source.split('/')[-1])[0], 'results_all',
                                          source.split('/')[-1] + '_fixed_clusters/'))
             cv2.imwrite(os.path.join(source.split(source.split('/')[-1])[0], 'results_all',
-                                     source.split('/')[-1] + '_fixed_clusters/') + frame_name, curr_img)
+                                     source.split('/')[-1] + '_fixed_clusters/') + str(tracklet_inner_cnt) + '_'+frame_name, curr_img)
         return tracks
 
     # kmeans_visualizer.show_clusters(sample, clusters, final_centers)
-    # show_clusters(cluster_tracks,mapping_node_id_to_bbox_second)
+    show_clusters(cluster_tracks,mapping_node_id_to_bbox_second)
 
     definite_track_list = set(split_each_track.keys()) - set(cluster_tracks.keys()) # definite track in first ssp
     def results_return(definite_track_list,cluster_tracks):
@@ -865,37 +865,37 @@ def tracks_combination(remained_tracks,result,result_second,mapping_node_id_to_b
     ############ 对K-means当中与split_each_track当中重合度较高的轨迹进行合并 #########
     print('### processing cluster results and original ssp###')
     ### 此处使用overlap进行计算并且删除掉轨迹更短的那一条 ###
-    dulplicate_track_list = []
+    # dulplicate_track_list = []
+    #
+    # # 需要选择两者当中不重合部分进行比较
+    # for id1 in list(definite_track_list):
+    #     for id2 in cluster_tracks:
+    #         if id1 == id2 or len(current_video_segment_predicted_tracks_bboxes_test_SSP[id1]) <2 or len(cluster_tracks[id2])<2: # 无法进行回归的情况直接跳过
+    #             continue
+    #         ### 计算common frames当中的overlap ###
+    #         track1 = current_video_segment_predicted_tracks_bboxes_test_SSP[id1]
+    #         track2 = cluster_tracks[id2]
+    #         frame_span1 = [int(mapping_node_id_to_bbox[node][2].split('.')[0]) for node in track1] # 自变量
+    #         frame_span2 = [int(mapping_node_id_to_bbox_second[node][2].split('.')[0]) for node in track2]
+    #         frame_bbox1 = {int(mapping_node_id_to_bbox[node][2].split('.')[0]): mapping_node_id_to_bbox[node][0] for node in track1}
+    #         frame_bbox2 = {int(mapping_node_id_to_bbox_second[node][2].split('.')[0]): mapping_node_id_to_bbox_second[node][0] for node in track2}
+    #         ## 如果两个集合为包含关系 ##
+    #         if set(frame_span1).issubset(set(frame_span2)) or set(frame_span2).issubset(set(frame_span1)):
+    #             common_frames = set(frame_span1).intersection(set(frame_span2)) #
+    #             tracklet_bbox1 = np.array([frame_bbox1[frame] for frame in common_frames])
+    #             tracklet_bbox2 = np.array([frame_bbox2[frame] for frame in common_frames])
+    #             tracklet_overlap_matrix  = compute_overlap_between_bbox_list(tracklet_bbox1.reshape(-1, 2, 2), tracklet_bbox2.reshape(-1, 2, 2))
+    #             overlap = np.diagonal(tracklet_overlap_matrix)
+    #             if np.mean(overlap) > 0.9: # 0.66
+    #                 print('track{0} and track{1} overlap is {2}'.format(id1, id2, np.mean(overlap)))
+    #                 id = id1 if len(frame_span1) < len(frame_span2) else id2 # id表示取其中frame_span更短的那一个
+    #                 dulplicate_track_list.append(id) # 可能是split当中的轨迹
+    # dulplicate_track_list = np.unique(dulplicate_track_list).tolist() # 需要唯一
+    # print('dulplicate_track_list',dulplicate_track_list)
+    # [cluster_tracks.pop(trackid) for trackid in dulplicate_track_list if trackid in cluster_tracks]
+    # [split_each_track.pop(trackid) for trackid in dulplicate_track_list if trackid in split_each_track] # 删除split_each_track会导致后面的结果出问题
 
-    # 需要选择两者当中不重合部分进行比较
-    for id1 in list(definite_track_list):
-        for id2 in cluster_tracks:
-            if id1 == id2 or len(current_video_segment_predicted_tracks_bboxes_test_SSP[id1]) <2 or len(cluster_tracks[id2])<2: # 无法进行回归的情况直接跳过
-                continue
-            ### 计算common frames当中的overlap ###
-            track1 = current_video_segment_predicted_tracks_bboxes_test_SSP[id1]
-            track2 = cluster_tracks[id2]
-            frame_span1 = [int(mapping_node_id_to_bbox[node][2].split('.')[0]) for node in track1] # 自变量
-            frame_span2 = [int(mapping_node_id_to_bbox_second[node][2].split('.')[0]) for node in track2]
-            frame_bbox1 = {int(mapping_node_id_to_bbox[node][2].split('.')[0]): mapping_node_id_to_bbox[node][0] for node in track1}
-            frame_bbox2 = {int(mapping_node_id_to_bbox_second[node][2].split('.')[0]): mapping_node_id_to_bbox_second[node][0] for node in track2}
-            ## 如果两个集合为包含关系 ##
-            if set(frame_span1).issubset(set(frame_span2)) or set(frame_span2).issubset(set(frame_span1)):
-                common_frames = set(frame_span1).intersection(set(frame_span2)) # 
-                tracklet_bbox1 = np.array([frame_bbox1[frame] for frame in common_frames])
-                tracklet_bbox2 = np.array([frame_bbox2[frame] for frame in common_frames])
-                tracklet_overlap_matrix  = compute_overlap_between_bbox_list(tracklet_bbox1.reshape(-1, 2, 2), tracklet_bbox2.reshape(-1, 2, 2))
-                overlap = np.diagonal(tracklet_overlap_matrix)
-                if np.mean(overlap) > 0.9: # 0.66
-                    print('track{0} and track{1} overlap is {2}'.format(id1, id2, np.mean(overlap)))
-                    id = id1 if len(frame_span1) < len(frame_span2) else id2 # id表示取其中frame_span更短的那一个
-                    dulplicate_track_list.append(id) # 可能是split当中的轨迹
-    dulplicate_track_list = np.unique(dulplicate_track_list).tolist() # 需要唯一
-    print('dulplicate_track_list',dulplicate_track_list)
-    [cluster_tracks.pop(trackid) for trackid in dulplicate_track_list if trackid in cluster_tracks]
-    [split_each_track.pop(trackid) for trackid in dulplicate_track_list if trackid in split_each_track] # 删除split_each_track会导致后面的结果出问题
-    # show_fix_clusters(cluster_tracks,mapping_node_id_to_bbox_second)
-
+    show_fix_clusters(cluster_tracks,mapping_node_id_to_bbox_second)
     return results_return(definite_track_list,cluster_tracks)
     # ##### 删除掉长度为1的轨迹并且进行结果的整理返回 #####
     # split_each_track_refined = {}
@@ -1124,7 +1124,7 @@ def cluster_fix(result, result_second,mapping_edge_id_to_cost, mapping_node_id_t
         return tracks
 
     # kmeans_visualizer.show_clusters(sample, clusters, final_centers)
-    # show_clusters(cluster_tracks)
+    show_clusters(cluster_tracks)
 
     definite_track_list = set(split_each_track.keys()) - set(cluster_tracks.keys())
     cluster_all_keys = set(cluster_tracks.keys())
