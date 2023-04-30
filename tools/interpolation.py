@@ -119,7 +119,7 @@ if __name__ == '__main__':
     save_path = '/home/allenyljiang/Documents/Dataset/MOT20/train/MOT20-01/results_all/dti'
 
     mkdir_if_missing(save_path)
-    dti(txt_path, save_path, n_min=20, n_dti=50)
+    dti(txt_path, save_path, n_min= 5, n_dti= 10)
     # dti(txt_path, save_path, n_min=10, n_dti=50)
     # print('Before DTI: ')
     # eval_mota(data_root, txt_path)
