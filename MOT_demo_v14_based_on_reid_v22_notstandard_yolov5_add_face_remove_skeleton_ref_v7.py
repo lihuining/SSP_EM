@@ -1438,7 +1438,7 @@ def stitching_tracklets(args,source,mapping_node_id_to_bbox,node_matching_dict,t
             vec2 = np.array([current_track_direction[0][0], current_track_direction[1][0]])
             direction = cosine_similarity(vec1, vec2)
             direction_similarity_matrix[[x for x in previous_video_segment_predicted_tracks].index(previous_tracklet_id), [x for x in current_video_segment_predicted_tracks].index(current_tracklet_id)] = direction
-            if direction < 0. and np.linalg.norm(vec2) > 2 and np.linalg.norm(vec1) > 2:
+            if direction < 0. and np.linalg.norm(vec2) > 4 and np.linalg.norm(vec1) > 4:
                 tracklets_similarity_matrix[[x for x in previous_video_segment_predicted_tracks].index(previous_tracklet_id), [x for x in current_video_segment_predicted_tracks].index(current_tracklet_id)] = 1
                 tracklets_reid_similarity_matrix[[x for x in previous_video_segment_predicted_tracks].index(previous_tracklet_id), [x for x in current_video_segment_predicted_tracks].index(current_tracklet_id)] = 1
                 continue
@@ -1512,6 +1512,7 @@ def stitching_tracklets(args,source,mapping_node_id_to_bbox,node_matching_dict,t
     #     result_dict_min[i+1] = min_index.tolist().index(i)+1 # 当前轨迹id与之前轨迹id对应关系  可能存在不对应的情况
     # 需要计算匹配的轨迹以及当前帧当中新出现的轨迹以及上一帧中没有匹配到的轨迹
     # 设置阈值
+    tracklets_reid_similarity_matrix_back_up = copy.deepcopy(tracklets_reid_similarity_matrix)
     iou_mask = np.where(tracklets_similarity_matrix > 0.7)
     ### sbs ###
     tracklets_reid_similarity_matrix /= 2.0
@@ -1697,8 +1698,8 @@ def stitching_tracklets(args,source,mapping_node_id_to_bbox,node_matching_dict,t
     #         curr_track = current_video_segment_predicted_tracks_bboxes_test[current_id]
     #         curr_nodes = list(curr_track.keys())
     #         curr_track_feat = current_video_feature[current_id]
-    #         reid_similarity[second_prev_track_list.index(previous_id),second_curr_track_list.index(current_id)] = 1 - cosine_similarity(np.array(prev_track_feat),np.array(curr_track_feat))
-    # matched_indices, previous_unmatched_ids, curr_unmatched_ids = linear_assignment(reid_similarity, thresh=0.01)  # ???
+    #         reid_similarity[second_prev_track_list.index(previous_id),second_curr_track_list.index(current_id)] = (1 - cosine_similarity(np.array(prev_track_feat),np.array(curr_track_feat))) /2.
+    # matched_indices, previous_unmatched_ids, curr_unmatched_ids = linear_assignment(reid_similarity, thresh=0.4)  # ???
     # for match in matched_indices:
     #     result_dict[second_curr_track_list[match[1]]] = second_prev_track_list[match[0]]
     #
@@ -3465,7 +3466,7 @@ def tracks_combination(args,tracklet_inner_cnt,remained_tracks,result,result_sec
                 vec1 = np.array([hfitter1[0],vfitter1[0]])
                 vec2 = np.array([hfitter2[0],vfitter2[0]])
                 direction = cosine_similarity(vec1,vec2)
-                if direction < 0. and np.linalg.norm(vec2) > 2 and np.linalg.norm(vec1) > 2:
+                if direction < 0. and np.linalg.norm(vec2) > 4 and np.linalg.norm(vec1) > 4:
                     continue
                 # if abs(hfitter1[0]-hfitter2[0]) > 5. and abs(vfitter1[0] - vfitter2[0]) > 3.:
                 #     continue
@@ -3682,7 +3683,7 @@ def detect(exp,args):
     else:
         files = [args.path]
     files.sort() # 对文件进行排序
-    # files = files[812:]
+    # files = files[110:]
     if args.ablation:
         files = files[len(files) // 2 + 1:]
     predictor = Predictor(model, exp, args.device, args.fp16)
@@ -3817,6 +3818,9 @@ def detect(exp,args):
                         # if mean_conf > 0.8:
                         n_clusters += 1
                         indefinite_node += segment_nodes
+                    # indefinite_node += trajectory_node_dict[track_id]
+                    # n_clusters += 1
+                    # error_tracks.append(track_id)
 
                 elif len(trajectory_idswitch_reliability_dict[track_id]) == 1 and len(current_video_segment_predicted_tracks_bboxes_test_SSP[track_id])< tracklet_len:
                     # if trajectory_idswitch_reliability_dict[track_id][0] == 1: # 对于只有一个valid_node的不加入进行修正
@@ -3825,6 +3829,7 @@ def detect(exp,args):
                     n_clusters += 1
                     error_tracks.append(track_id)
             error_tracks = np.unique(error_tracks).tolist()
+            indefinite_node = np.unique(indefinite_node).tolist()
             unique_frame_list = sorted(np.unique([mapping_node_id_to_bbox[x][2] for x in mapping_node_id_to_bbox]))
             ##### 修正之前纯SSP算法结果 #####
             if args.save_result:
@@ -4176,13 +4181,13 @@ if __name__ == '__main__':
 
             exp.test_conf = max(0.001, args.track_low_thresh - 0.01) # 0.09
             detect(exp,args)
-    np.save('figs/entropy_onestage.npy',entropy_one_stage)
-    np.save('figs/entropy_two_stage_1.npy',entropy_two_stage_1)
-    np.save('figs/entropy_two_stage_2.npy',entropy_two_stage_2)
+    np.save('figs/'+args.benchmark+args.eval+'entropy_onestage.npy',entropy_one_stage)
+    np.save('figs/'+args.benchmark+args.eval+'entropy_two_stage_1.npy',entropy_two_stage_1)
+    np.save('figs/'+args.benchmark+args.eval+'entropy_two_stage_2.npy',entropy_two_stage_2)
     mainTimer.toc()
     print("TOTAL TIME END-to-END (with loading networks and images): ", mainTimer.total_time)
-    print("TOTAL TIME (Detector + Tracker): " + str(timer.total_time) + ", FPS: " + str(1.0 /timer.average_time))
-    print("TOTAL TIME (Tracker only): " + str(trackerTimer.total_time) + ", FPS: " + str(1.0 / trackerTimer.average_time))
+    # print("TOTAL TIME (Detector + Tracker): " + str(timer.total_time) + ", FPS: " + str(1.0 /timer.average_time))
+    # print("TOTAL TIME (Tracker only): " + str(trackerTimer.total_time) + ", FPS: " + str(1.0 / trackerTimer.average_time))
 
     # detect(opt,exp,args)
 
