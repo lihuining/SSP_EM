@@ -3213,7 +3213,7 @@ def mapping_tracklet_data_preparation(gmc,files,tracklet_pose_collection,similar
     tracklet_inner_idx_list = []
     node_id_cnt_list = []
     parallel_tasks_args_list = []
-    for tracklet_inner_idx in range(0, tracklet_len):
+    for tracklet_inner_idx in range(len(tracklet_pose_collection)):
         curr_frame_dict = tracklet_pose_collection[tracklet_inner_idx]  # 当前处理帧
         if len(curr_frame_dict['bbox_list']) == 0:
             continue
@@ -3258,7 +3258,7 @@ def mapping_tracklet_data_preparation(gmc,files,tracklet_pose_collection,similar
         out_file = os.path.join(dump_curr_video_name, 'parallel_tasks_args_list_frame' + str(tracklet_inner_cnt + 1 - tracklet_len) + 'to' + str(tracklet_inner_cnt) + '.json')
         json.dump(parallel_tasks_args_list_for_dump, codecs.open(out_file, 'w', encoding='utf-8'), separators=(',', ':'), sort_keys=True)
     node_id_cnt = 1
-    for tracklet_inner_idx in range(0, tracklet_len):
+    for tracklet_inner_idx in range(len(tracklet_pose_collection)):
         # tracklet_pose_collection is a dict, each key is an integer of frame id, the value corresponding to the key is a dict with following keys:
         # 'bbox_list': a list of bboxes in the frame, each bbox with floating data [(left coordinate, top coordinate), (right coordinate, bottom coordinate)], body bboxes
         # 'head_bbox_list': a list of bboxes in the frame, each bbox with floating data [(left coordinate, top coordinate), (right coordinate, bottom coordinate)], head bboxes
@@ -3374,7 +3374,7 @@ def mapping_data_preparation(gmc,files,encoder,tracklet_pose_collection,similari
     tracklet_inner_idx_list = []
     node_id_cnt_list = []
     parallel_tasks_args_list = []
-    for tracklet_inner_idx in range(0, tracklet_len):
+    for tracklet_inner_idx in range(len(tracklet_pose_collection)):
         curr_frame_dict = tracklet_pose_collection[tracklet_inner_idx]  # 当前处理帧
         if len(curr_frame_dict['bbox_list']) == 0:
             continue
@@ -3419,7 +3419,7 @@ def mapping_data_preparation(gmc,files,encoder,tracklet_pose_collection,similari
         out_file = os.path.join(dump_curr_video_name, 'parallel_tasks_args_list_frame' + str(tracklet_inner_cnt + 1 - tracklet_len) + 'to' + str(tracklet_inner_cnt) + '.json')
         json.dump(parallel_tasks_args_list_for_dump, codecs.open(out_file, 'w', encoding='utf-8'), separators=(',', ':'), sort_keys=True)
     node_id_cnt = 1
-    for tracklet_inner_idx in range(0, tracklet_len):
+    for tracklet_inner_idx in range(len(tracklet_pose_collection)):
         # tracklet_pose_collection is a dict, each key is an integer of frame id, the value corresponding to the key is a dict with following keys:
         # 'bbox_list': a list of bboxes in the frame, each bbox with floating data [(left coordinate, top coordinate), (right coordinate, bottom coordinate)], body bboxes
         # 'head_bbox_list': a list of bboxes in the frame, each bbox with floating data [(left coordinate, top coordinate), (right coordinate, bottom coordinate)], head bboxes
@@ -3995,7 +3995,7 @@ def detect(exp,args):
     else:
         files = [args.path]
     files.sort() # 对文件进行排序
-    # files = files[91:]
+    #files = files[594:]
     if args.ablation:
         files = files[len(files) // 2 + 1:]
     predictor = Predictor(model, exp, args.device, args.fp16)
@@ -4437,7 +4437,8 @@ if __name__ == '__main__':
     if args.benchmark == 'MOT20':
         train_seqs = [1]
         # train_seqs = [1, 2, 3, 5]
-        test_seqs = [4, 6, 7, 8]
+        test_seqs = [8]
+        #test_seqs = [4, 6, 7, 8]
         seqs_ext = ['']
         MOT = 20
     elif args.benchmark == 'MOT17':
@@ -4447,7 +4448,11 @@ if __name__ == '__main__':
         seqs_ext = ['FRCNN', 'DPM', 'SDP']
         MOT = 17
     else:
-        raise ValueError("Error: Unsupported benchmark:" + args.benchmark)
+        train_seqs = [2,4,5,9,10,11,13]
+        test_seqs = [1,3,6,7,8,12,14]
+        seqs_ext = ['']
+        MOT = 16
+        #raise ValueError("Error: Unsupported benchmark:" + args.benchmark)
 
     ablation = False
     if args.split_to_eval == 'train':
@@ -4474,7 +4479,7 @@ if __name__ == '__main__':
                 seq += '-' + ext
 
             args.name = seq
-
+            print('current seq',args.name)
             args.ablation = ablation
             args.mot20 = MOT == 20 # 在MOT20上则为True
             args.fps = 30
@@ -4514,13 +4519,14 @@ if __name__ == '__main__':
                 else:
                     args.track_buffer = 30
 
-                if seq == 'MOT17-01-FRCNN':
+                if seq in ['MOT17-01-FRCNN','MOT16-01','MOT16-02']: # (800, 1440)
                     args.track_high_thresh = 0.65
-                elif seq == 'MOT17-06-FRCNN':
+                elif seq in ['MOT17-06-FRCNN','MOT17-05-FRCNN','MOT16-05','MOT16-06']:
                     args.track_high_thresh = 0.65
-                elif seq == 'MOT17-12-FRCNN':
+                    exp.test_size = (480, 640)
+                elif seq in ['MOT17-12-FRCNN','MOT16-12','MOT16-11']:
                     args.track_high_thresh = 0.7
-                elif seq == 'MOT17-14-FRCNN':
+                elif seq in ['MOT17-14-FRCNN','MOT16-13','MOT16-14']:
                     args.track_high_thresh = 0.67
                 elif seq in ['MOT20-06', 'MOT20-08']: # 对MOT20-06以及MOT20-08的高置信度进行单独调整
                     args.track_high_thresh = 0.3
