@@ -425,7 +425,7 @@ def make_parser():
     # /home/allenyljiang/Documents/Dataset/MOT20
     parser.add_argument("--camid", type=int, default=0, help="webcam demo camera id")
     parser.add_argument("--benchmark", dest="benchmark", type=str, default='MOT20', help="benchmark to evaluate: MOT17 | MOT20")
-    parser.add_argument("--eval", dest="split_to_eval", type=str, default='train', help="split to evaluate: train | val | test")
+    parser.add_argument("--eval", dest="split_to_eval", type=str, default='test', help="split to evaluate: train | val | test")
     parser.add_argument("-c", "--ckpt", default='pretrained/bytetrack_x_mot20.tar', type=str, help="ckpt for eval")
     parser.add_argument("--default-parameters", dest="default_parameters", default=True, action="store_true", help="use the default parameters as in the paper")
     #parser.add_argument("--save-frames", dest="save_frames", default=True, action="store_true", help="save sequences with tracks.")
@@ -519,7 +519,7 @@ def make_parser():
     # 结果可视化
     parser.add_argument('--save-result', dest="save_result",default=False,
                         help='whether save the visualizition result')  # python demo.py --save-result 启用该参数
-    parser.set_defaults(save_result = True)
+    # parser.set_defaults(save_result = True)
     return parser
 
 
@@ -3764,7 +3764,7 @@ def tracks_combination(args,tracklet_inner_cnt,remained_tracks,result,result_sec
                 # # if (np.sign(hfitter1[0]) != np.sign(hfitter2[0]) and mask_h) or (np.sign(vfitter1[0]) != np.sign(vfitter2[0]) and mask_v):
                 #     continue # 如果方向不同则不能进行合并
                 ious = np.diagonal(tracklet_ious_matrix)
-                print('track{0} and track{1} iou is {2}'.format(id1,id2,np.mean(ious[frame_span.index(min(tmp_span)):frame_span.index(max(tmp_span))+1])))
+                # print('track{0} and track{1} iou is {2}'.format(id1,id2,np.mean(ious[frame_span.index(min(tmp_span)):frame_span.index(max(tmp_span))+1])))
                 if np.mean(ious[frame_span.index(min(tmp_span)):frame_span.index(max(tmp_span))+1]) > 0.55: # 0.66,0.57，0.64
                     # 不是一个人的最大0.478,0.60
                     id = min(id1,id2)
@@ -3821,8 +3821,8 @@ def tracks_combination(args,tracklet_inner_cnt,remained_tracks,result,result_sec
     # print('dulplicate_track_list',dulplicate_track_list)
     # [cluster_tracks.pop(trackid) for trackid in dulplicate_track_list if trackid in cluster_tracks]
     # [split_each_track.pop(trackid) for trackid in dulplicate_track_list if trackid in split_each_track] # 删除split_each_track会导致后面的结果出问题
-
-    show_fix_clusters(cluster_tracks,mapping_node_id_to_bbox_second)
+    if args.save_result:
+        show_fix_clusters(cluster_tracks,mapping_node_id_to_bbox_second)
     return results_return(definite_track_list,cluster_tracks)
 def whether_on_border(x1,y1,x2,y2):
     global frame_width,frame_height
@@ -3906,7 +3906,7 @@ def detect(exp,args):
     if args.trt:
         args.device = "gpu"
     args.device = torch.device("cuda" if args.device == "gpu" else "cpu")
-
+    txtname = os.path.join(output_dir,source.split('/')[-2]+'.txt')
     logger.info("Args: {}".format(args))
     setup_logger(file_name, distributed_rank=rank, filename="val_log.txt", mode="a")
     if args.conf is not None:
@@ -4155,7 +4155,8 @@ def detect(exp,args):
                         os.makedirs(os.path.join(source.split(source.split('/')[-1])[0], 'results_all',source.split('/')[-1] + 'need_fix_tracks/'))
                     cv2.imwrite(os.path.join(source.split(source.split('/')[-1])[0], 'results_all',source.split('/')[-1] + 'need_fix_tracks/') + frame_name, curr_img)
                 return tracks
-            tracks = show_fix_tracks(current_video_segment_predicted_tracks_bboxes_test_SSP)
+            if args.save_result:
+                tracks = show_fix_tracks(current_video_segment_predicted_tracks_bboxes_test_SSP)
             unique_frame_list = sorted(np.unique([mapping_node_id_to_bbox[x][2] for x in mapping_node_id_to_bbox]))
             ##### 修正之前纯SSP算法结果 #####
             if args.save_result:
@@ -4284,7 +4285,7 @@ def detect(exp,args):
                 current_video_segment_predicted_tracks_bboxes_test_backup = copy.deepcopy(current_video_segment_predicted_tracks_bboxes_test)
                 current_trajectory_similarity_dict_backup = copy.deepcopy(current_trajectory_similarity_dict)
                 #all_video_predicted_tracks = copy.deepcopy(current_video_segment_predicted_tracks_bboxes)
-                total_txt = open(os.path.join(source.split(source.split('/')[-1])[0], 'results_all/') + (source.split('/')[-2]+'.txt'), 'w')
+                total_txt = open(txtname, 'w')
                 base_track_id += len(split_each_track)  # 给没有匹配上的轨迹起始编号
                 # frame_list = copy.deepcopy(unique_frame_list)
                 # curr_batch_txt = open(os.path.join(source.split(source.split('/')[-1])[0], 'results',source.split('/')[-1] + '_SSP_EM/') + start_frame_name.replace('.jpg', '.txt'), 'r')
@@ -4310,7 +4311,7 @@ def detect(exp,args):
 
                 total_txt.close()
             else:
-                total_txt = open(os.path.join(source.split(source.split('/')[-1])[0], 'results_all/') + (source.split('/')[-2]+'.txt'), 'a')
+                total_txt = open(txtname, 'a')
                 # frame_list = [unique_frame_list[-1]] # int类型不可以迭代
                 frame_list = unique_frame_list[-batch_stride_write:] # int类型不可以迭代
                 if batch_id == batch_cnt:
@@ -4412,7 +4413,7 @@ if __name__ == '__main__':
     if args.benchmark == 'MOT20':
         train_seqs = [1]
         # train_seqs = [1, 2, 3, 5]
-        test_seqs = [6, 7, 8]
+        test_seqs = [4, 6, 7, 8]
         seqs_ext = ['']
         MOT = 20
     elif args.benchmark == 'MOT17':
