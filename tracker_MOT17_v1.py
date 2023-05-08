@@ -2511,9 +2511,9 @@ def update_split_each_track_valid_mask(result):
     # traverse trajectories
     for idx_track in range(1, int(result[0].split('Predicted tracks')[1].split('\n')[1].split('~~')[0]) + 1):
         # each node pair denotes one bounding box or one edge, if it is a bounding box, it starts with an odd number and ends with an even number
-        for node_pair in split_each_track[idx_track]:
+        for idx,node_pair in enumerate(split_each_track[idx_track]):
             # This element is a node
-            if (int(node_pair[0]) % 2 == 1) and (int(node_pair[1]) % 2 == 0): # 表示节点
+            if idx % 2 == 0:#(int(node_pair[0]) % 2 == 1) and (int(node_pair[1]) % 2 == 0): # 表示节点
                 # regular nodes should be composed of two adjacent numbers, if not, the corresponding element in split_each_track_valid_mask should be set to -1
                 # Note that an element correponding to an irregular bounding box in split_each_track_valid_mask, an element correponding to an edge which is adjacent to an irregular bounding box in
                 # split_each_track_valid_mask is set to 0
@@ -2523,6 +2523,14 @@ def update_split_each_track_valid_mask(result):
                         split_each_track_valid_mask[idx_track][max([split_each_track[idx_track].index(node_pair) - 1, 0])] = 0  # prev element 前一个元素代表连边
                     if split_each_track[idx_track].index(node_pair) != len(split_each_track[idx_track]) - 1:
                         split_each_track_valid_mask[idx_track][min([split_each_track[idx_track].index(node_pair) + 1, len(split_each_track[idx_track]) - 1])] = 0  # next element 后一个元素置0
+
+            # elif int(node_pair[0]) > int(node_pair[1]) : # invalid edge
+            #     split_each_track_valid_mask[idx_track][split_each_track[idx_track].index(node_pair)] = 0  # invalid edge
+            #     if split_each_track[idx_track].index(node_pair) != -1:
+            #         split_each_track_valid_mask[idx_track][max([split_each_track[idx_track].index(node_pair) - 1, 0])] = -1
+            #     if split_each_track[idx_track].index(node_pair) != len(split_each_track[idx_track]) - 1:
+            #         split_each_track_valid_mask[idx_track][min([split_each_track[idx_track].index(node_pair) + 1, len(split_each_track[idx_track]) - 1])] = -1  # next element 后一个元素置-1,next_node
+
     # judge whether two trajectories share common parts when the same node appears in two trajectories，同一个节点出现在两条轨迹当中
     for idx_track in range(1, int(result[0].split('Predicted tracks')[1].split('\n')[1].split('~~')[0]) + 1): # idx_track：key
         for node_pair in split_each_track[idx_track]:
@@ -4210,6 +4218,7 @@ def detect(exp,args):
     global frame_height
     global tracklet_len
     global gap
+    tracklet_len = args.tracklet_len
     all_terminate_track_list = []
     #### initialization ####
     output_dir = osp.join(exp.output_dir, args.benchmark,'cmc')#exp.output_dir='./YOLOX_outputs,benchmark:dataset name
@@ -4525,7 +4534,7 @@ def detect(exp,args):
                     result_second = tracking(mapping_node_id_to_bbox_second, mapping_edge_id_to_cost_second, tracklet_inner_cnt)
                     if 'Predicted tracks' in result_second[0] and len(indefinite_node) > 0:
                     # if len(mapping_node_id_to_bbox_second) > 10:
-                        split_each_track_SSP_second,split_each_track_valid_mask_second= update_split_each_track_valid_mask(result_second)
+                        split_each_track_SSP_second,split_each_track_valid_mask_second= update_split_each_track_valid_mask_second(result_second)
                         if args.save_result:
                             ##### 低置信度框 ###
                             for frame_name in unique_frame_list:
@@ -4758,8 +4767,8 @@ if __name__ == '__main__':
         MOT = 17
     elif args.benchmark == 'MOT16':
         train_seqs = [2,4,5,9,10,11,13]
-        #test_seqs = [6,7,8,12,14]
-        test_seqs = [1,3,6,7,8,12,14]
+        test_seqs = [7,8,12,14]
+        #test_seqs = [1,3,6,7,8,12,14]
         seqs_ext = ['']
         MOT = 16
         #raise ValueError("Error: Unsupported benchmark:" + args.benchmark)

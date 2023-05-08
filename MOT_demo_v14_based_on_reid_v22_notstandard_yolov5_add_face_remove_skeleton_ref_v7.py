@@ -3903,6 +3903,7 @@ def detect(exp,args):
     global frame_height
     global tracklet_len
     global gap
+    tracklet_len = args.tracklet_len
     all_terminate_track_list = []
     #### initialization ####
     output_dir = osp.join(exp.output_dir, args.benchmark)#exp.output_dir='./YOLOX_outputs,benchmark:dataset name
@@ -4218,7 +4219,7 @@ def detect(exp,args):
                     result_second = tracking(mapping_node_id_to_bbox_second, mapping_edge_id_to_cost_second, tracklet_inner_cnt)
                     if 'Predicted tracks' in result_second[0] and len(indefinite_node) > 0:
                     # if len(mapping_node_id_to_bbox_second) > 10:
-                        split_each_track_SSP_second,split_each_track_valid_mask_second= update_split_each_track_valid_mask(result_second)
+                        split_each_track_SSP_second,split_each_track_valid_mask_second= update_split_each_track_valid_mask_second(result_second)
                         if args.save_result:
                             ##### 低置信度框 ###
                             for frame_name in unique_frame_list:
