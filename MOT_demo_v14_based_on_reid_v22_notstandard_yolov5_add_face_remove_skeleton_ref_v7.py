@@ -3607,7 +3607,7 @@ def tracks_combination(args,tracklet_inner_cnt,remained_tracks,result,result_sec
     # kmeans_visualizer.show_clusters(sample, clusters, final_centers)
     #show_clusters(cluster_tracks,mapping_node_id_to_bbox_second)
 
-    definite_track_list = set(split_each_track.keys()) - set(cluster_tracks.keys()) # definite track in first ssp
+    definite_track_list = set(split_each_track.keys()) - set(remained_tracks) # definite track in first ssp
     def results_return(definite_track_list,cluster_tracks):
         ##### 删除掉长度为1的轨迹并且进行结果的整理返回 #####
         split_each_track_refined = {}

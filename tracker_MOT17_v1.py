@@ -737,7 +737,7 @@ def convert_node_ids(mapping_node_id_to_bbox, mapping_edge_id_to_cost):
     even_node_cost = math.log(1.0 / 2 / 1.0)
     src_dst_node_cost = math.log(maximum_possible_number)
     # even_node_cost_add = -abs(2 * src_dst_node_cost + even_node_cost) - 0.1 # -abs(2 * src_dst_node_cost + most_unreliable_edge_cost + 2 * even_node_cost) / 2 - 0.1
-    even_node_cost_add = -abs(2 * src_dst_node_cost + even_node_cost) -0.1  # -abs(2 * src_dst_node_cost + most_unreliable_edge_cost + 2 * even_node_cost) / 2 - 0.1
+    even_node_cost_add = -abs(2 * src_dst_node_cost + even_node_cost) #-0.1  # -abs(2 * src_dst_node_cost + most_unreliable_edge_cost + 2 * even_node_cost) / 2 - 0.1
 
     for mapping_node_id_to_bbox_key in mapping_node_id_to_bbox:
         result_mapping_node_id_to_bbox[str(src_id)+'_'+str(int(mapping_node_id_to_bbox_key) * 2)] = math.log(maximum_possible_number) # 源到该节点
@@ -1479,6 +1479,7 @@ def stitching_tracklets(gmc,files,args,source,mapping_node_id_to_bbox,node_match
                     second_priority_inds.append(idx)
                 else:
                     first_priority_inds.append(idx)
+                current_priority_dict[current_tracklet_id] = conf_first_bbox
             trajectory_from_curr = current_video_segment_predicted_tracks_bboxes[current_tracklet_id] # 当前batch的一条轨迹
             sum_error_trajectories = 0.0 # 前一个batch中轨迹和当前batch轨迹的误差
             sum_error_trajectories_num_value_cnt = 0.0 #
@@ -1538,20 +1539,21 @@ def stitching_tracklets(gmc,files,args,source,mapping_node_id_to_bbox,node_match
     tracklets_reid_similarity_matrix [tracklets_reid_similarity_matrix > args.appearance_thresh] = 1.0
     tracklets_reid_similarity_matrix[iou_mask] = 1.0
     fused_similarity_matrix = np.minimum(tracklets_reid_similarity_matrix,tracklets_similarity_matrix) # 混合距离
-    # ##### 对轨迹预测结果进行可视化#####
-    # unique_frame_list = sorted(np.unique([mapping_node_id_to_bbox[x][2] for x in mapping_node_id_to_bbox]))
-    # if not os.path.exists(os.path.join(source.split(source.split('/')[-1])[0], 'results_all', source.split('/')[-1] + '_predicted_vis/')):
-    #     os.makedirs(os.path.join(source.split(source.split('/')[-1])[0], 'results_all', source.split('/')[-1] + '_predicted_vis/'))
-    # for frame_name in unique_frame_list:
-    #     curr_img = cv2.imread(os.path.join(source, frame_name))
-    #     for trackid in predicted_bbox_based_on_historical_traj:
-    #         if frame_name in predicted_bbox_based_on_historical_traj[trackid]:
-    #             (left,top),(right,bottom) = predicted_bbox_based_on_historical_traj[trackid][frame_name]
-    #             #top2, bottom2, left2, right2 = predicted_bbox_based_on_historical_traj2[trackid][frame_name]
-    #             cv2.rectangle(curr_img, (int(left), int(top)), (int(right), int(bottom)), (255, 0, 0), 2) # 蓝色为一阶拟合结果
-    #             #cv2.rectangle(curr_img, (int(left2), int(top2)), (int(right2), int(bottom2)), (0, 0, 255), 2) # 红色为二阶拟合结果
-    #             cv2.putText(curr_img, str(trackid), (int(left), int(top)), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 255, 0), 3)
-    #     cv2.imwrite(os.path.join(source.split(source.split('/')[-1])[0], 'results_all', source.split('/')[-1] + '_predicted_vis/')  + frame_name, curr_img)
+    if args.save_result:
+        ##### 对轨迹预测结果进行可视化#####
+        unique_frame_list = sorted(np.unique([mapping_node_id_to_bbox[x][2] for x in mapping_node_id_to_bbox]))
+        if not os.path.exists(os.path.join(source.split(source.split('/')[-1])[0], 'results_all', source.split('/')[-1] + '_predicted_vis/')):
+            os.makedirs(os.path.join(source.split(source.split('/')[-1])[0], 'results_all', source.split('/')[-1] + '_predicted_vis/'))
+        for frame_name in unique_frame_list:
+            curr_img = cv2.imread(os.path.join(source, frame_name))
+            for trackid in predicted_bbox_based_on_historical_traj:
+                if frame_name in predicted_bbox_based_on_historical_traj[trackid]:
+                    (left,top),(right,bottom) = predicted_bbox_based_on_historical_traj[trackid][frame_name]
+                    #top2, bottom2, left2, right2 = predicted_bbox_based_on_historical_traj2[trackid][frame_name]
+                    cv2.rectangle(curr_img, (int(left), int(top)), (int(right), int(bottom)), (255, 0, 0), 2) # 蓝色为一阶拟合结果
+                    #cv2.rectangle(curr_img, (int(left2), int(top2)), (int(right2), int(bottom2)), (0, 0, 255), 2) # 红色为二阶拟合结果
+                    cv2.putText(curr_img, str(trackid), (int(left), int(top)), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 255, 0), 3)
+            cv2.imwrite(os.path.join(source.split(source.split('/')[-1])[0], 'results_all', source.split('/')[-1] + '_predicted_vis/')  + frame_name, curr_img)
     def top_k_softmax(k,prob_matrix):
         '''
         k:track number
@@ -3897,8 +3899,10 @@ def tracks_combination(args,tracklet_inner_cnt,remained_tracks,result,result_sec
                             mapping_node_id_to_bbox[bboxid][0][1][1])
                         # cv2.putText(curr_img, str(getDictKey_1(cluster_tracks,bboxid)), (int((left+right)/2), int((top+bottom)/2)), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 255), 3)
                         cv2.putText(curr_img, str(track_id), (left, top),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 255), 3)
-                        cv2.rectangle(curr_img, (left, top), (right, bottom), (0, 255, 0), 3)
+                                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+                        cv2.putText(curr_img,str(round(mapping_node_id_to_bbox[bboxid][1],2)), (right, bottom),
+                                cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2)
+                        cv2.rectangle(curr_img, (left, top), (right, bottom), (0, 255, 0), 2)
             if not os.path.exists(os.path.join(source.split(source.split('/')[-1])[0], 'results_all',
                                                source.split('/')[-1] + '_fixed_clusters/')):
                 os.makedirs(os.path.join(source.split(source.split('/')[-1])[0], 'results_all',
@@ -3910,11 +3914,11 @@ def tracks_combination(args,tracklet_inner_cnt,remained_tracks,result,result_sec
     # kmeans_visualizer.show_clusters(sample, clusters, final_centers)
     #show_clusters(cluster_tracks,mapping_node_id_to_bbox_second)
 
-    definite_track_list = set(split_each_track.keys()) - set(cluster_tracks.keys()) # definite track in first ssp
+    definite_track_list = set(split_each_track.keys()) - set(remained_tracks) # definite track in first ssp
     def results_return(definite_track_list,cluster_tracks):
         ##### 删除掉长度为1的轨迹并且进行结果的整理返回 #####
         split_each_track_refined = {}
-        final_track_list = np.unique(list(definite_track_list) + list(cluster_tracks.keys())).tolist()
+        final_track_list = np.unique(list(definite_track_list) + list(cluster_tracks.keys())).tolist() # first ssp definite track + second results
         base_node = max(list(mapping_node_id_to_bbox.keys()))
         for track_id in final_track_list:
             # if trajectory_idswitch_reliability_dict[track_id][0] == tracklet_len:
@@ -4014,7 +4018,7 @@ def tracks_combination(args,tracklet_inner_cnt,remained_tracks,result,result_sec
     cluster_tracks = remove_dulplicate_frames(cluster_tracks)
     if args.save_result:
         show_fix_clusters(cluster_tracks,mapping_node_id_to_bbox_second)
-    return results_return(definite_track_list,cluster_tracks)
+    #return results_return(definite_track_list,cluster_tracks)
     ### 对于K-means当中的tracklets进行合并 ###
     '''
     1、合并的时候以较小的track_id为准
@@ -4298,7 +4302,7 @@ def detect(exp,args):
     else:
         files = [args.path]
     files.sort() # 对文件进行排序
-    # files = files[433:]
+    files = files[-20:]
     if args.ablation:
         files = files[len(files) // 2 + 1:]
     predictor = Predictor(model, exp, args.device, args.fp16)
@@ -4538,6 +4542,7 @@ def detect(exp,args):
                                             left, top = int(mapping_node_id_to_bbox_second[int(int(split_each_track_SSP_second[human_id][node_idx][1]) / 2)][0][0][0]), int(mapping_node_id_to_bbox_second[int(int(split_each_track_SSP_second[human_id][node_idx][1]) / 2)][0][0][1])
                                             right, bottom = int(mapping_node_id_to_bbox_second[int(int(split_each_track_SSP_second[human_id][node_idx][1]) / 2)][0][1][0]), int(mapping_node_id_to_bbox_second[int(int(split_each_track_SSP_second[human_id][node_idx][1]) / 2)][0][1][1])
                                             cv2.rectangle(curr_img, (left, top), (right, bottom), (0, 255, 0), 2)
+                                            cv2.putText(curr_img,str(round(mapping_node_id_to_bbox_second[int(int(split_each_track_SSP_second[human_id][node_idx][1]) / 2)][1],2)), (right, bottom),cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2)
                                             cv2.putText(curr_img, str(human_id), (left, top), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
                                 cv2.imwrite(ssp_second_path + '/'+ str(tracklet_inner_cnt) + '_' + frame_name, curr_img)
                         ## 进行轨迹合并 ##
@@ -4682,7 +4687,7 @@ def detect(exp,args):
                         unmatched_tracks_memory_dict[unmatch] = 1 # 初始化未配对次数
                     else:
                         unmatched_tracks_memory_dict[unmatch] += 1 # 次数+1
-                    if unmatched_tracks_memory_dict[unmatch] >= 10: # 次数 >= 3之后忽略，认为轨迹终止
+                    if unmatched_tracks_memory_dict[unmatch] >= 5: # 次数 >= 3之后忽略，认为轨迹终止
                         continue
                     current_video_segment_predicted_tracks_bboxes_backup[unmatch] = copy.deepcopy(previous_video_segment_predicted_tracks_bboxes[unmatch])
                     current_video_segment_predicted_tracks_backup[unmatch] = copy.deepcopy(previous_video_segment_predicted_tracks[unmatch])
@@ -4753,6 +4758,7 @@ if __name__ == '__main__':
         MOT = 17
     elif args.benchmark == 'MOT16':
         train_seqs = [2,4,5,9,10,11,13]
+        #test_seqs = [6,7,8,12,14]
         test_seqs = [1,3,6,7,8,12,14]
         seqs_ext = ['']
         MOT = 16
@@ -4783,7 +4789,7 @@ if __name__ == '__main__':
                 seq += '-' + ext
 
             args.name = seq
-
+            print('current seq',seq)
             args.ablation = ablation
             args.mot20 = MOT == 20 # 在MOT20上则为True
             args.fps = 30
