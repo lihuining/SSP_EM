@@ -528,7 +528,7 @@ def make_parser():
     # 结果可视化
     parser.add_argument('--save-result', dest="save_result",default=False,
                         help='whether save the visualizition result')  # python demo.py --save-result 启用该参数
-    parser.set_defaults(save_result = True)
+    #parser.set_defaults(save_result = True)
     return parser
 
 
@@ -2388,6 +2388,9 @@ def convert_dict_to_str(result, split_each_track):
 # split_each_track_valid_mask is {1: 1 if [1, 2] is valid else 0, 2: 1 if .. else 0, 3: 1 if .. else 0, 4:1 if .. else 0, 5:1 if .. else 0, ...}
 
 def update_split_each_track_valid_mask_second(result):
+    '''
+    check out valid node or dulplicate node, the former tracklet has higher priority
+    '''
     # split_each_track is a dict, each key is an index of a trajectory, the value is the list of nodes in the trajectory, each node is a list with two numbers
     # split_each_track_valid_mask is a dict, the keys are the same as split_each_track_valid, the value under each key is a bool number indicating the validity of the node
     split_each_track = {}
@@ -2408,9 +2411,9 @@ def update_split_each_track_valid_mask_second(result):
     # traverse trajectories
     for idx_track in range(1, int(result[0].split('Predicted tracks')[1].split('\n')[1].split('~~')[0]) + 1):
         # each node pair denotes one bounding box or one edge, if it is a bounding box, it starts with an odd number and ends with an even number
-        for node_pair in split_each_track[idx_track]:
+        for idx,node_pair in enumerate(split_each_track[idx_track]):
             # This element is a node
-            if (int(node_pair[0]) % 2 == 1) and (int(node_pair[1]) % 2 == 0): # 表示节点
+            if idx % 2 == 0:#(int(node_pair[0]) % 2 == 1) and (int(node_pair[1]) % 2 == 0): # 表示节点
                 # regular nodes should be composed of two adjacent numbers, if not, the corresponding element in split_each_track_valid_mask should be set to -1
                 # Note that an element correponding to an irregular bounding box in split_each_track_valid_mask, an element correponding to an edge which is adjacent to an irregular bounding box in
                 # split_each_track_valid_mask is set to 0
@@ -2422,75 +2425,26 @@ def update_split_each_track_valid_mask_second(result):
                         split_each_track_valid_mask[idx_track][min([split_each_track[idx_track].index(node_pair) + 1, len(split_each_track[idx_track]) - 1])] = 0  # next element 后一个元素置0
     # judge whether two trajectories share common parts when the same node appears in two trajectories，同一个节点出现在两条轨迹当中
     for idx_track in range(1, int(result[0].split('Predicted tracks')[1].split('\n')[1].split('~~')[0]) + 1): # idx_track：key
-        for node_pair in split_each_track[idx_track]:
+        for idx1,node_pair in enumerate(split_each_track[idx_track]):
             # traverse another track, idx_track and idx_another_track indicate two different tracks
             for idx_another_track in [x for x in range(1, int(result[0].split('Predicted tracks')[1].split('\n')[1].split('~~')[0]) + 1) if x != idx_track]: # 另外一条id不等于idx_track的轨迹
+                if idx_another_track < idx_track:
+                    continue
                 # if the node with content node_pair appears in two trajectories: split_each_track[idx_track] and split_each_track[idx_another_track]
-                if node_pair in split_each_track[idx_another_track]:
-                    # length_common_curr_track_first_half: a list of indices in split_each_track[idx_track], starting from the previous one of node_pair and ending at the index of the first
-                    # common node shared by split_each_track[idx_track] and split_each_track[idx_another_track]
-                    # range前两个参数表示范围（，-1）到-1但是不包括，最后-1表示步长即倒序
-                    length_common_curr_track_first_half = [x for x in range(split_each_track[idx_track].index(node_pair) - 1, -1, -1) \
-                                                           if (split_each_track_valid_mask[idx_track][x] > 0 and split_each_track[idx_track][x] in split_each_track[idx_another_track])]
-                    # length_common_curr_track_second_half: a list of indices in split_each_track[idx_track], starting from the index of node_pair and ending at the index of the last
-                    # common node shared by split_each_track[idx_track] and split_each_track[idx_another_track]
-                    length_common_curr_track_second_half = [x for x in range(split_each_track[idx_track].index(node_pair), len(split_each_track[idx_track])) \
-                                                            if (split_each_track_valid_mask[idx_track][x] > 0 and split_each_track[idx_track][x] in split_each_track[idx_another_track])]
-                    # the number of common nodes shared by split_each_track[idx_track] and split_each_track[idx_another_track]
-                    length_common_curr_track = len(length_common_curr_track_first_half) + len(length_common_curr_track_second_half)
-                    # length_common_another_track_first_half: the same as length_common_curr_track_first_half but in split_each_track[idx_another_track]
-                    length_common_another_track_first_half = [x for x in range(split_each_track[idx_another_track].index(node_pair) - 1, -1, -1) \
-                                                              if (split_each_track_valid_mask[idx_another_track][x] > 0 and split_each_track[idx_another_track][x] in split_each_track[idx_track])]
-                    # length_common_another_track_second_half: the same as length_common_curr_track_second_half but in split_each_track[idx_another_track]
-                    length_common_another_track_second_half = [x for x in range(split_each_track[idx_another_track].index(node_pair), len(split_each_track[idx_another_track])) \
-                                                               if (split_each_track_valid_mask[idx_another_track][x] > 0 and split_each_track[idx_another_track][x] in split_each_track[idx_track])]
-                    # the number of common nodes shared by split_each_track[idx_another_track] and split_each_track[idx_track]
-                    length_common_another_track = len(length_common_another_track_first_half) + len(length_common_another_track_second_half)
-
-                    # length_common_curr_track denotes the segment of nodes in current track all of which have appeared in another track,
-                    # length_common_another_track denotes the segment of nodes in another track all of which have appeared in current track,
-                    # if the former is shorter than the latter, this may happen in the case where other common nodes in current track appear in current track but not adjacent to the segment of nodes
-                    # the shortest one in [length_common_curr_track, length_common_another_track] contains a subset of common nodes, their validity must be set to 0 and -1
-                    if length_common_curr_track < length_common_another_track and len(length_common_curr_track_first_half) > 0 and len(length_common_curr_track_second_half) > 0:
-                        for split_each_track_valid_mask_idx_track_idx in range(length_common_curr_track_first_half[-1], length_common_curr_track_second_half[-1] + 1):
-                            if int(split_each_track[idx_track][split_each_track_valid_mask_idx_track_idx][0]) % 2 == 1 and int(split_each_track[idx_track][split_each_track_valid_mask_idx_track_idx][1]) % 2 == 0:
-                                split_each_track_valid_mask[idx_track][split_each_track_valid_mask_idx_track_idx] = -1
-                            else:
-                                split_each_track_valid_mask[idx_track][split_each_track_valid_mask_idx_track_idx] = 0
-                    elif length_common_curr_track < length_common_another_track and len(length_common_curr_track_first_half) == 0 and len(length_common_curr_track_second_half) > 0:
-                        for split_each_track_valid_mask_idx_track_idx in range(split_each_track[idx_track].index(node_pair), length_common_curr_track_second_half[-1] + 1):
-                            if int(split_each_track[idx_track][split_each_track_valid_mask_idx_track_idx][0]) % 2 == 1 and int(split_each_track[idx_track][split_each_track_valid_mask_idx_track_idx][1]) % 2 == 0:
-                                split_each_track_valid_mask[idx_track][split_each_track_valid_mask_idx_track_idx] = -1
-                            else:
-                                split_each_track_valid_mask[idx_track][split_each_track_valid_mask_idx_track_idx] = 0
-                    elif length_common_curr_track < length_common_another_track and len(length_common_curr_track_first_half) > 0 and len(length_common_curr_track_second_half) == 0:
-                        for split_each_track_valid_mask_idx_track_idx in range(length_common_curr_track_first_half[-1], split_each_track[idx_track].index(node_pair) + 1):
-                            if int(split_each_track[idx_track][split_each_track_valid_mask_idx_track_idx][0]) % 2 == 1 and int(split_each_track[idx_track][split_each_track_valid_mask_idx_track_idx][1]) % 2 == 0:
-                                split_each_track_valid_mask[idx_track][split_each_track_valid_mask_idx_track_idx] = -1
-                            else:
-                                split_each_track_valid_mask[idx_track][split_each_track_valid_mask_idx_track_idx] = 0
-                    elif length_common_curr_track > length_common_another_track and len(length_common_another_track_first_half) > 0 and len(length_common_another_track_second_half) > 0:
-                        for split_each_track_valid_mask_idx_another_track_idx in range(length_common_another_track_first_half[-1], length_common_another_track_second_half[-1] + 1):
-                            if int(split_each_track[idx_another_track][split_each_track_valid_mask_idx_another_track_idx][0]) % 2 == 1 and int(split_each_track[idx_another_track][split_each_track_valid_mask_idx_another_track_idx][1]) % 2 == 0:
-                                split_each_track_valid_mask[idx_another_track][split_each_track_valid_mask_idx_another_track_idx] = -1
-                            else:
-                                split_each_track_valid_mask[idx_another_track][split_each_track_valid_mask_idx_another_track_idx] = 0
-                    elif length_common_curr_track > length_common_another_track and len(length_common_another_track_first_half) == 0 and len(length_common_another_track_second_half) > 0:
-                        for split_each_track_valid_mask_idx_another_track_idx in range(split_each_track[idx_another_track].index(node_pair), length_common_another_track_second_half[-1] + 1):
-                            if int(split_each_track[idx_another_track][split_each_track_valid_mask_idx_another_track_idx][0]) % 2 == 1 and int(split_each_track[idx_another_track][split_each_track_valid_mask_idx_another_track_idx][1]) % 2 == 0: # 表示人的节点
-                                split_each_track_valid_mask[idx_another_track][split_each_track_valid_mask_idx_another_track_idx] = -1
-                            else: # 表示边的节点
-                                split_each_track_valid_mask[idx_another_track][split_each_track_valid_mask_idx_another_track_idx] = 0
-                    elif length_common_curr_track > length_common_another_track and len(length_common_another_track_first_half) > 0 and len(length_common_another_track_second_half) == 0:
-                        for split_each_track_valid_mask_idx_another_track_idx in range(length_common_another_track_first_half[-1], split_each_track[idx_another_track].index(node_pair) + 1):
-                            if int(split_each_track[idx_another_track][split_each_track_valid_mask_idx_another_track_idx][0]) % 2 == 1 and int(split_each_track[idx_another_track][split_each_track_valid_mask_idx_another_track_idx][1]) % 2 == 0:
-                                split_each_track_valid_mask[idx_another_track][split_each_track_valid_mask_idx_another_track_idx] = -1
-                            else:
-                                split_each_track_valid_mask[idx_another_track][split_each_track_valid_mask_idx_another_track_idx] = 0
-
+                if idx1 % 2 == 0: # node
+                    if node_pair in split_each_track[idx_another_track]:
+                        split_each_track_valid_mask[idx_another_track][split_each_track[idx_another_track].index(node_pair)] = -1  # invalid node
+                        if split_each_track[idx_another_track].index(node_pair) != 0: # 在track当中的索引
+                            split_each_track_valid_mask[idx_another_track][max([split_each_track[idx_another_track].index(node_pair) - 1, 0])] = 0  # prev element 前一个元素代表连边
+                        if split_each_track[idx_another_track].index(node_pair) != len(split_each_track[idx_another_track]) - 1:
+                            split_each_track_valid_mask[idx_another_track][min([split_each_track[idx_another_track].index(node_pair) + 1, len(split_each_track[idx_another_track]) - 1])] = 0  # next element 后一个元素置0
+                
     return split_each_track, split_each_track_valid_mask
 
 def update_split_each_track_valid_mask(result):
+    '''
+    fix the intersection situation
+    '''
     # split_each_track is a dict, each key is an index of a trajectory, the value is the list of nodes in the trajectory, each node is a list with two numbers
     # split_each_track_valid_mask is a dict, the keys are the same as split_each_track_valid, the value under each key is a bool number indicating the validity of the node
     split_each_track = {}
@@ -2524,16 +2478,17 @@ def update_split_each_track_valid_mask(result):
                     if split_each_track[idx_track].index(node_pair) != len(split_each_track[idx_track]) - 1:
                         split_each_track_valid_mask[idx_track][min([split_each_track[idx_track].index(node_pair) + 1, len(split_each_track[idx_track]) - 1])] = 0  # next element 后一个元素置0
 
-            # elif int(node_pair[0]) > int(node_pair[1]) : # invalid edge
-            #     split_each_track_valid_mask[idx_track][split_each_track[idx_track].index(node_pair)] = 0  # invalid edge
-            #     if split_each_track[idx_track].index(node_pair) != -1:
-            #         split_each_track_valid_mask[idx_track][max([split_each_track[idx_track].index(node_pair) - 1, 0])] = -1
-            #     if split_each_track[idx_track].index(node_pair) != len(split_each_track[idx_track]) - 1:
-            #         split_each_track_valid_mask[idx_track][min([split_each_track[idx_track].index(node_pair) + 1, len(split_each_track[idx_track]) - 1])] = -1  # next element 后一个元素置-1,next_node
+            elif idx % 2 == 1:
+                if int(node_pair[0]) > int(node_pair[1]) : # invalid edge
+                    split_each_track_valid_mask[idx_track][split_each_track[idx_track].index(node_pair)] = 0  # invalid edge
+                    if split_each_track[idx_track].index(node_pair) != -1:
+                        split_each_track_valid_mask[idx_track][max([split_each_track[idx_track].index(node_pair) - 1, 0])] = -1
+                    if split_each_track[idx_track].index(node_pair) != len(split_each_track[idx_track]) - 1:
+                        split_each_track_valid_mask[idx_track][min([split_each_track[idx_track].index(node_pair) + 1, len(split_each_track[idx_track]) - 1])] = -1  # next element 后一个元素置-1,next_node
 
     # judge whether two trajectories share common parts when the same node appears in two trajectories，同一个节点出现在两条轨迹当中
     for idx_track in range(1, int(result[0].split('Predicted tracks')[1].split('\n')[1].split('~~')[0]) + 1): # idx_track：key
-        for node_pair in split_each_track[idx_track]:
+        for idx,node_pair in enumerate(split_each_track[idx_track]):
             # traverse another track, idx_track and idx_another_track indicate two different tracks
             for idx_another_track in [x for x in range(1, int(result[0].split('Predicted tracks')[1].split('\n')[1].split('~~')[0]) + 1) if x != idx_track]: # 另外一条id不等于idx_track的轨迹
                 # if the node with content node_pair appears in two trajectories: split_each_track[idx_track] and split_each_track[idx_another_track]
@@ -2558,64 +2513,18 @@ def update_split_each_track_valid_mask(result):
                                 split_each_track_valid_mask[idx_another_track][min([split_each_track[idx_another_track].index(node_pair_tmp) + 1, len(split_each_track[idx_another_track]) - 1])] = -1  # next element 后一个元素置-1,next_node
                     else:
                         node_pair_tmp = node_pair # node_pair_tmp for idx_another,node_pair for idx_track
-                    length_common_curr_track_first_half = [x for x in range(split_each_track[idx_track].index(node_pair) - 1, -1, -1) \
-                                                           if (split_each_track_valid_mask[idx_track][x] > 0 and (split_each_track[idx_track][x] in split_each_track[idx_another_track] or split_each_track[idx_track][x][::-1] in split_each_track[idx_another_track]))]
-                    # length_common_curr_track_second_half: a list of indices in split_each_track[idx_track], starting from the index of node_pair and ending at the index of the last
-                    # common node shared by split_each_track[idx_track] and split_each_track[idx_another_track]
-                    length_common_curr_track_second_half = [x for x in range(split_each_track[idx_track].index(node_pair), len(split_each_track[idx_track])) \
-                                                            if (split_each_track_valid_mask[idx_track][x] > 0 and (split_each_track[idx_track][x] in split_each_track[idx_another_track] or split_each_track[idx_track][x][::-1] in split_each_track[idx_another_track]))]
-                    # the number of common nodes shared by split_each_track[idx_track] and split_each_track[idx_another_track]
-                    length_common_curr_track = len(length_common_curr_track_first_half) + len(length_common_curr_track_second_half)
-                    # length_common_another_track_first_half: the same as length_common_curr_track_first_half but in split_each_track[idx_another_track]
-                    length_common_another_track_first_half = [x for x in range(split_each_track[idx_another_track].index(node_pair_tmp) - 1, -1, -1) \
-                                                              if (split_each_track_valid_mask[idx_another_track][x] > 0 and (split_each_track[idx_another_track][x] in split_each_track[idx_track] or split_each_track[idx_another_track][x][::-1] in split_each_track[idx_track]))]
-                    # length_common_another_track_second_half: the same as length_common_curr_track_second_half but in split_each_track[idx_another_track]
-                    length_common_another_track_second_half = [x for x in range(split_each_track[idx_another_track].index(node_pair_tmp), len(split_each_track[idx_another_track])) \
-                                                               if (split_each_track_valid_mask[idx_another_track][x] > 0 and (split_each_track[idx_another_track][x] in split_each_track[idx_track] or split_each_track[idx_another_track][x][::-1] in split_each_track[idx_track]))]
-                    # the number of common nodes shared by split_each_track[idx_another_track] and split_each_track[idx_track]
-                    length_common_another_track = len(length_common_another_track_first_half) + len(length_common_another_track_second_half)
-
-                    # length_common_curr_track denotes the segment of nodes in current track all of which have appeared in another track,
-                    # length_common_another_track denotes the segment of nodes in another track all of which have appeared in current track,
-                    # if the former is shorter than the latter, this may happen in the case where other common nodes in current track appear in current track but not adjacent to the segment of nodes
-                    # the shortest one in [length_common_curr_track, length_common_another_track] contains a subset of common nodes, their validity must be set to 0 and -1
-                    if length_common_curr_track < length_common_another_track and len(length_common_curr_track_first_half) > 0 and len(length_common_curr_track_second_half) > 0:
-                        for split_each_track_valid_mask_idx_track_idx in range(length_common_curr_track_first_half[-1], length_common_curr_track_second_half[-1] + 1):
-                            if int(split_each_track[idx_track][split_each_track_valid_mask_idx_track_idx][0]) % 2 == 1 and int(split_each_track[idx_track][split_each_track_valid_mask_idx_track_idx][1]) % 2 == 0:
-                                split_each_track_valid_mask[idx_track][split_each_track_valid_mask_idx_track_idx] = -1
-                            else:
-                                split_each_track_valid_mask[idx_track][split_each_track_valid_mask_idx_track_idx] = 0
-                    elif length_common_curr_track < length_common_another_track and len(length_common_curr_track_first_half) == 0 and len(length_common_curr_track_second_half) > 0:
-                        for split_each_track_valid_mask_idx_track_idx in range(split_each_track[idx_track].index(node_pair), length_common_curr_track_second_half[-1] + 1):
-                            if int(split_each_track[idx_track][split_each_track_valid_mask_idx_track_idx][0]) % 2 == 1 and int(split_each_track[idx_track][split_each_track_valid_mask_idx_track_idx][1]) % 2 == 0:
-                                split_each_track_valid_mask[idx_track][split_each_track_valid_mask_idx_track_idx] = -1
-                            else:
-                                split_each_track_valid_mask[idx_track][split_each_track_valid_mask_idx_track_idx] = 0
-                    elif length_common_curr_track < length_common_another_track and len(length_common_curr_track_first_half) > 0 and len(length_common_curr_track_second_half) == 0:
-                        for split_each_track_valid_mask_idx_track_idx in range(length_common_curr_track_first_half[-1], split_each_track[idx_track].index(node_pair) + 1):
-                            if int(split_each_track[idx_track][split_each_track_valid_mask_idx_track_idx][0]) % 2 == 1 and int(split_each_track[idx_track][split_each_track_valid_mask_idx_track_idx][1]) % 2 == 0:
-                                split_each_track_valid_mask[idx_track][split_each_track_valid_mask_idx_track_idx] = -1
-                            else:
-                                split_each_track_valid_mask[idx_track][split_each_track_valid_mask_idx_track_idx] = 0
-                    elif length_common_curr_track > length_common_another_track and len(length_common_another_track_first_half) > 0 and len(length_common_another_track_second_half) > 0:
-                        for split_each_track_valid_mask_idx_another_track_idx in range(length_common_another_track_first_half[-1], length_common_another_track_second_half[-1] + 1):
-                            if int(split_each_track[idx_another_track][split_each_track_valid_mask_idx_another_track_idx][0]) % 2 == 1 and int(split_each_track[idx_another_track][split_each_track_valid_mask_idx_another_track_idx][1]) % 2 == 0:
-                                split_each_track_valid_mask[idx_another_track][split_each_track_valid_mask_idx_another_track_idx] = -1
-                            else:
-                                split_each_track_valid_mask[idx_another_track][split_each_track_valid_mask_idx_another_track_idx] = 0
-                    elif length_common_curr_track > length_common_another_track and len(length_common_another_track_first_half) == 0 and len(length_common_another_track_second_half) > 0:
-                        for split_each_track_valid_mask_idx_another_track_idx in range(split_each_track[idx_another_track].index(node_pair_tmp), length_common_another_track_second_half[-1] + 1):
-                            if int(split_each_track[idx_another_track][split_each_track_valid_mask_idx_another_track_idx][0]) % 2 == 1 and int(split_each_track[idx_another_track][split_each_track_valid_mask_idx_another_track_idx][1]) % 2 == 0: # 表示人的节点
-                                split_each_track_valid_mask[idx_another_track][split_each_track_valid_mask_idx_another_track_idx] = -1
-                            else: # 表示边的节点
-                                split_each_track_valid_mask[idx_another_track][split_each_track_valid_mask_idx_another_track_idx] = 0
-                    elif length_common_curr_track > length_common_another_track and len(length_common_another_track_first_half) > 0 and len(length_common_another_track_second_half) == 0:
-                        for split_each_track_valid_mask_idx_another_track_idx in range(length_common_another_track_first_half[-1], split_each_track[idx_another_track].index(node_pair_tmp) + 1):
-                            if int(split_each_track[idx_another_track][split_each_track_valid_mask_idx_another_track_idx][0]) % 2 == 1 and int(split_each_track[idx_another_track][split_each_track_valid_mask_idx_another_track_idx][1]) % 2 == 0:
-                                split_each_track_valid_mask[idx_another_track][split_each_track_valid_mask_idx_another_track_idx] = -1
-                            else:
-                                split_each_track_valid_mask[idx_another_track][split_each_track_valid_mask_idx_another_track_idx] = 0
-                    # else: # length_common_curr_track = length_common_another_track
+                    if idx % 2 == 0 and split_each_track_valid_mask[idx_track][split_each_track[idx_track].index(node_pair)] == 1:
+                        split_each_track_valid_mask[idx_track][split_each_track[idx_track].index(node_pair)] = -1  # curr element
+                        if split_each_track[idx_track].index(node_pair) != 0: # 在track当中的索引
+                            split_each_track_valid_mask[idx_track][max([split_each_track[idx_track].index(node_pair) - 1, 0])] = 0  # prev element 前一个元素代表连边
+                        if split_each_track[idx_track].index(node_pair) != len(split_each_track[idx_track]) - 1:
+                            split_each_track_valid_mask[idx_track][min([split_each_track[idx_track].index(node_pair) + 1, len(split_each_track[idx_track]) - 1])] = 0  # next element 后一个元素置0
+                    elif idx % 2 == 1 and split_each_track_valid_mask[idx_track][split_each_track[idx_track].index(node_pair)] == 1: # invalid common edge
+                        split_each_track_valid_mask[idx_track][split_each_track[idx_track].index(node_pair)] = 0  # invalid edge
+                        if split_each_track[idx_track].index(node_pair) != -1:
+                            split_each_track_valid_mask[idx_track][max([split_each_track[idx_track].index(node_pair) - 1, 0])] = -1
+                        if split_each_track[idx_track].index(node_pair) != len(split_each_track[idx_track]) - 1:
+                            split_each_track_valid_mask[idx_track][min([split_each_track[idx_track].index(node_pair) + 1, len(split_each_track[idx_track]) - 1])] = -1  # next element 后一个元素置-1,next_node
 
     return split_each_track, split_each_track_valid_mask
 
@@ -4221,7 +4130,7 @@ def detect(exp,args):
     tracklet_len = args.tracklet_len
     all_terminate_track_list = []
     #### initialization ####
-    output_dir = osp.join(exp.output_dir, args.benchmark,'cmc')#exp.output_dir='./YOLOX_outputs,benchmark:dataset name
+    output_dir = osp.join(exp.output_dir, args.benchmark,'cmc','motchallenge')#exp.output_dir='./YOLOX_outputs,benchmark:dataset name
     os.makedirs(output_dir, exist_ok=True)
     file_name = os.path.join(exp.output_dir, args.benchmark)
     rank = args.local_rank
@@ -4311,7 +4220,7 @@ def detect(exp,args):
     else:
         files = [args.path]
     files.sort() # 对文件进行排序
-    files = files[-20:]
+    # files = files[-20:]
     if args.ablation:
         files = files[len(files) // 2 + 1:]
     predictor = Predictor(model, exp, args.device, args.fp16)
@@ -4754,8 +4663,8 @@ if __name__ == '__main__':
     device = args.device # gpu
 
     if args.benchmark == 'MOT20':
-        train_seqs = [1]
-        # train_seqs = [1, 2, 3, 5]
+        #train_seqs = [1]
+        train_seqs = [1, 2, 3, 5]
         test_seqs = [4, 6, 7, 8]
         seqs_ext = ['']
         MOT = 20
@@ -4763,12 +4672,14 @@ if __name__ == '__main__':
         # train_seqs = [13]
         train_seqs = [2, 4, 5, 9, 10, 11, 13]
         test_seqs = [1, 3, 6, 7, 8, 12, 14]
-        seqs_ext = ['FRCNN', 'DPM', 'SDP']
+        seqs_ext = ['FRCNN']
+        #seqs_ext = ['FRCNN', 'DPM', 'SDP']
         MOT = 17
     elif args.benchmark == 'MOT16':
         train_seqs = [2,4,5,9,10,11,13]
-        test_seqs = [7,8,12,14]
-        #test_seqs = [1,3,6,7,8,12,14]
+        #train_seqs = [11]
+        #test_seqs = [12,14]
+        test_seqs = [1,3,6,7,8,12,14]
         seqs_ext = ['']
         MOT = 16
         #raise ValueError("Error: Unsupported benchmark:" + args.benchmark)
@@ -4855,14 +4766,14 @@ if __name__ == '__main__':
                 else:
                     args.track_buffer = 30
 
-                if seq in ['MOT17-01-FRCNN','MOT16-01','MOT16-02']: # (800, 1440)
+                if seq in ['MOT17-01-FRCNN','MOT17-02-FRCNN','MOT16-01','MOT16-02']: # (800, 1440)
                     args.track_high_thresh = 0.65
                 elif seq in ['MOT17-06-FRCNN','MOT17-05-FRCNN','MOT16-05','MOT16-06']:
                     args.track_high_thresh = 0.65
                     exp.test_size = (480, 640)
-                elif seq in ['MOT17-12-FRCNN','MOT16-12','MOT16-11']:
+                elif seq in ['MOT17-12-FRCNN','MOT17-11-FRCNN','MOT16-12','MOT16-11']:
                     args.track_high_thresh = 0.7
-                elif seq in ['MOT17-14-FRCNN','MOT16-13','MOT16-14']:
+                elif seq in ['MOT17-14-FRCNN','MOT17-13-FRCNN','MOT16-13','MOT16-14']:
                     args.track_high_thresh = 0.67
                 elif seq in ['MOT20-06', 'MOT20-08']: # 对MOT20-06以及MOT20-08的高置信度进行单独调整
                     args.track_high_thresh = 0.3
