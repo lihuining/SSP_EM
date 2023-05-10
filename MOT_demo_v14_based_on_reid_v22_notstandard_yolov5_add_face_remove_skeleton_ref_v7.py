@@ -1041,7 +1041,6 @@ def compute_inter_person_similarity_worker(gmc,files,input_list, whether_use_iou
             idx1 = files.index(curr_frame_dict['img_dir'])
             idx2 = files.index(next_frame_dict['img_dir'])
             warp1 = gmc.apply(idx1+1)
-            warp2 = gmc.apply(idx1+2)
             # to find the index of each bounding box in all people in current batch of frames
             # if curr_frame_dict['box_confidence_scores'][curr_frame_dict['bbox_list'].index(curr_person_bbox_coord)] > 1.0 or next_frame_dict['box_confidence_scores'][next_frame_dict['bbox_list'].index(next_person_bbox_coord)] > 1.0:
             #     person_to_person_matching_matrix[curr_frame_dict['bbox_list'].index(curr_person_bbox_coord), next_frame_dict['bbox_list'].index(next_person_bbox_coord)] = 1.0
@@ -1058,7 +1057,9 @@ def compute_inter_person_similarity_worker(gmc,files,input_list, whether_use_iou
             if idx2 - idx1 == 1:
                 curr_person_bbox_coord_gmc = warp_pos(np.array(curr_person_bbox_coord),warp1)
             else:
+                warp2 = gmc.apply(idx1 + 2)
                 curr_person_bbox_coord_gmc = warp_pos(np.array(warp_pos(np.array(curr_person_bbox_coord),warp1)),warp2) # 返回的为list:(tuple)
+
             # iou:top,bottom,left,right
             person_to_person_matching_matrix_iou[
                 curr_frame_dict['bbox_list'].index(curr_person_bbox_coord), next_frame_dict['bbox_list'].index(next_person_bbox_coord)] = \
@@ -1471,6 +1472,9 @@ def stitching_tracklets(args,source,mapping_node_id_to_bbox,node_matching_dict,t
         existing_largest_height = np.max(np.array(existing_bottom_coordinates) - np.array(existing_top_coordinates))
         ##### 前一帧轨迹只有1个点的时候无法进行拟合 ########
         if len(independent_variable) < 2:
+            previous_last_bbox = previous_video_segment_predicted_tracks_bboxes[previous_tracklet_id][list(previous_video_segment_predicted_tracks_bboxes[previous_tracklet_id].keys())[-1]]
+            current_first_bbox = current_video_segment_predicted_tracks_bboxes[current_tracklet_id][list(current_video_segment_predicted_tracks_bboxes[current_tracklet_id].keys())[0]]
+            tracklets_similarity_matrix[:,[x for x in current_video_segment_predicted_tracks].index(current_tracklet_id)] = 1 - compute_iou_single_box([previous_last_bbox[0][1], previous_last_bbox[1][1], previous_last_bbox[0][0], previous_last_bbox[1][0]],[current_first_bbox[0][1], current_first_bbox[1][1], current_first_bbox[0][0], current_first_bbox[1][0]]) # (y1y2x1x2)
             tracklets_similarity_matrix[[x for x in previous_video_segment_predicted_tracks].index(previous_tracklet_id), :] = 1
             continue
         horicenter_fitter_coefficients = np.polyfit(independent_variable, existing_horicenter_coordinates, 1)
@@ -3906,7 +3910,7 @@ def detect(exp,args):
     tracklet_len = args.tracklet_len
     all_terminate_track_list = []
     #### initialization ####
-    output_dir = osp.join(exp.output_dir, args.benchmark)#exp.output_dir='./YOLOX_outputs,benchmark:dataset name
+    output_dir = osp.join(exp.output_dir, args.benchmark,'window_size_'+str(args.tracklet_len))#exp.output_dir='./YOLOX_outputs,benchmark:dataset name
     os.makedirs(output_dir, exist_ok=True)
     file_name = os.path.join(exp.output_dir, args.benchmark)
     rank = args.local_rank
