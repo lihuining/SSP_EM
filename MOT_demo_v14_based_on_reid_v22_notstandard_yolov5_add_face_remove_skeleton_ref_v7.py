@@ -1470,25 +1470,19 @@ def stitching_tracklets(args,source,mapping_node_id_to_bbox,node_matching_dict,t
         existing_vertcenter_coordinates = ((np.array(existing_top_coordinates) + np.array(existing_bottom_coordinates)) / 2.0).tolist() # 垂直中心点
         existing_largest_width = np.max(np.array(existing_right_coordinates) - np.array(existing_left_coordinates)) # 物体出现过程当中bbox会逐渐变大，使用最大的确保能够框到
         existing_largest_height = np.max(np.array(existing_bottom_coordinates) - np.array(existing_top_coordinates))
-        ##### 前一帧轨迹只有1个点的时候无法进行拟合 ########
-        if len(independent_variable) < 2:
-            previous_last_bbox = previous_video_segment_predicted_tracks_bboxes[previous_tracklet_id][list(previous_video_segment_predicted_tracks_bboxes[previous_tracklet_id].keys())[-1]]
-            current_first_bbox = current_video_segment_predicted_tracks_bboxes[current_tracklet_id][list(current_video_segment_predicted_tracks_bboxes[current_tracklet_id].keys())[0]]
-            tracklets_similarity_matrix[:,[x for x in current_video_segment_predicted_tracks].index(current_tracklet_id)] = 1 - compute_iou_single_box([previous_last_bbox[0][1], previous_last_bbox[1][1], previous_last_bbox[0][0], previous_last_bbox[1][0]],[current_first_bbox[0][1], current_first_bbox[1][1], current_first_bbox[0][0], current_first_bbox[1][0]]) # (y1y2x1x2)
-            tracklets_similarity_matrix[[x for x in previous_video_segment_predicted_tracks].index(previous_tracklet_id), :] = 1
-            continue
-        horicenter_fitter_coefficients = np.polyfit(independent_variable, existing_horicenter_coordinates, 1)
-        vertcenter_fitter_coefficients = np.polyfit(independent_variable, existing_vertcenter_coordinates, 1)
-        horicenter_fitter = np.poly1d(horicenter_fitter_coefficients) # np.poly1d根据数组生成一个多项式
-        vertcenter_fitter = np.poly1d(vertcenter_fitter_coefficients)
-        previous_track_fitter[previous_tracklet_id] = [horicenter_fitter,vertcenter_fitter]
-        previous_track_direction = [horicenter_fitter_coefficients,vertcenter_fitter_coefficients]
-        # # ## 2d fitter ##
-        predicted_bbox_based_on_historical_traj[previous_tracklet_id] = {}
-        predicted_bbox_based_on_historical_traj2[previous_tracklet_id] = {}
-        #previous_single_track_information['poly_error'] = np.polyfit(independent_variable, existing_horicenter_coordinates, 1,full=True)[1][0] + np.polyfit(independent_variable, existing_vertcenter_coordinates, 1,full=True)[1][0]
-        previous_single_track_information['direction'] = [horicenter_fitter,vertcenter_fitter]
-        previous_track_information[previous_tracklet_id] = previous_single_track_information
+        if len(independent_variable) >=2 :
+            horicenter_fitter_coefficients = np.polyfit(independent_variable, existing_horicenter_coordinates, 1)
+            vertcenter_fitter_coefficients = np.polyfit(independent_variable, existing_vertcenter_coordinates, 1)
+            horicenter_fitter = np.poly1d(horicenter_fitter_coefficients) # np.poly1d根据数组生成一个多项式
+            vertcenter_fitter = np.poly1d(vertcenter_fitter_coefficients)
+            previous_track_fitter[previous_tracklet_id] = [horicenter_fitter,vertcenter_fitter]
+            previous_track_direction = [horicenter_fitter_coefficients,vertcenter_fitter_coefficients]
+            # # ## 2d fitter ##
+            predicted_bbox_based_on_historical_traj[previous_tracklet_id] = {}
+            predicted_bbox_based_on_historical_traj2[previous_tracklet_id] = {}
+            #previous_single_track_information['poly_error'] = np.polyfit(independent_variable, existing_horicenter_coordinates, 1,full=True)[1][0] + np.polyfit(independent_variable, existing_vertcenter_coordinates, 1,full=True)[1][0]
+            previous_single_track_information['direction'] = [horicenter_fitter,vertcenter_fitter]
+            previous_track_information[previous_tracklet_id] = previous_single_track_information
         # polyfit_3d_error[previous_tracklet_id] = np.polyfit(independent_variable, existing_horicenter_coordinates, 3,full=True)[1][0] + np.polyfit(independent_variable, existing_vertcenter_coordinates, 3,full=True)[1][0]
         previous_track_reid = previous_video_feature[previous_tracklet_id]
         for idx,current_tracklet_id in enumerate(current_video_segment_predicted_tracks_bboxes): # 遍历当前batch的轨迹
@@ -1524,8 +1518,10 @@ def stitching_tracklets(args,source,mapping_node_id_to_bbox,node_matching_dict,t
                 curr_horicenter_coordinates = ((np.array(curr_left_coordinates) + np.array(curr_right_coordinates)) / 2.0).tolist() # 水平中心点
                 curr_vertcenter_coordinates = ((np.array(curr_top_coordinates) + np.array(curr_bottom_coordinates)) / 2.0).tolist() # 垂直中心点
                 ##### 前一帧轨迹只有1个点的时候无法进行拟合 ########
-                if len(curr_independent_variable) < 2:
-                    tracklets_similarity_matrix[:,[x for x in current_video_segment_predicted_tracks].index(current_tracklet_id)] = 1
+                if len(curr_independent_variable) < 2 or len(independent_variable) < 2:
+                    previous_last_bbox = previous_video_segment_predicted_tracks_bboxes[previous_tracklet_id][list(previous_video_segment_predicted_tracks_bboxes[previous_tracklet_id].keys())[-1]]
+                    current_first_bbox = current_video_segment_predicted_tracks_bboxes[current_tracklet_id][list(current_video_segment_predicted_tracks_bboxes[current_tracklet_id].keys())[0]]
+                    tracklets_similarity_matrix[:,[x for x in current_video_segment_predicted_tracks].index(current_tracklet_id)] = 1 - compute_iou_single_box([previous_last_bbox[0][1], previous_last_bbox[1][1], previous_last_bbox[0][0], previous_last_bbox[1][0]],[current_first_bbox[0][1], current_first_bbox[1][1], current_first_bbox[0][0], current_first_bbox[1][0]]) # (y1y2x1x2)
                     continue
                 curr_horicenter_fitter_coefficients = np.polyfit(curr_independent_variable, curr_horicenter_coordinates, 1)
                 curr_vertcenter_fitter_coefficients = np.polyfit(curr_independent_variable, curr_vertcenter_coordinates, 1)
