@@ -1655,34 +1655,12 @@ def stitching_tracklets(args,source,mapping_node_id_to_bbox,node_matching_dict,t
     for track_id in current_video_segment_predicted_tracks_bboxes:
         if track_id not in list(result_dict.keys()):
             curr_unmatched_tracks.append(track_id)
-
     # entropy_fuse = top_k_softmax(k,1-fused_similarity_matrix)
     # entropy_iou = top_k_softmax(k,1-tracklets_similarity_matrix)
     # entropy_reid = top_k_softmax(k,1-tracklets_reid_similarity_matrix)
     # tracklets_similarity_matrix[matched_indices[:,0],matched_indices[:,1]]： 所有匹配的iou损失矩阵
     # tracklets_reid_similarity_matrix[matched_indices[:,0],matched_indices[:,1]]： 所有匹配的reid损失矩阵, > 0.02不是同一个人
     # tracklets_similarity_matrix[previous_tracks_id.index(36),:]
-
-    # mean_similarity_list = []
-    # for m in matched_indices: # 40,39
-    #     # 对matched_indices进行判断
-    #     # 对大于0.53的进行排除
-    #     # print(tracklets_similarity_matrix[m[0],m[1]])
-    #     mean_similarity_list.append(tracklets_similarity_matrix[m[0],m[1]])
-    #     if tracklets_similarity_matrix[m[0],m[1]] >= 0.5:  # 3 and 40
-    #         previous_unmatched_tracks.append(previous_tracks_id[m[0]])
-    #         curr_unmatched_tracks.append(current_tracks_id[m[1]])
-    #         continue
-    #     result_dict[current_tracks_id[m[1]]] = previous_tracks_id[m[0]]
-    # # print(np.mean(mean_similarity_list))
-    # 
-    # for track_id in previous_video_segment_predicted_tracks_bboxes:
-    #     if (track_id not in np.array(previous_tracks_id)[matched_indices[:,0]]):
-    #         previous_unmatched_tracks.append(track_id)
-    # 
-    # for track_id in current_video_segment_predicted_tracks_bboxes:
-    #     if (track_id not in np.array(current_tracks_id)[matched_indices[:,1]]):
-    #         curr_unmatched_tracks.append(track_id)
     ## curr_unmatched与其余curr_tracks计算相似度来判断
     dulplicate_track_list = []
     definite_track_list = list(set(current_tracks_id) - set(curr_unmatched_tracks)) # curr当中匹配上的tracks
@@ -1705,7 +1683,7 @@ def stitching_tracklets(args,source,mapping_node_id_to_bbox,node_matching_dict,t
                 tracklet_bbox2 = np.array([frame_bbox2[frame] for frame in common_frames])
                 tracklet_overlap_matrix = compute_iou_between_bbox_list(tracklet_bbox1.reshape(-1, 2, 2),tracklet_bbox2.reshape(-1, 2, 2))
                 overlap = np.diagonal(tracklet_overlap_matrix)
-                if np.mean(overlap) > 0.9:  # 0.66
+                if np.mean(overlap) > 0.8:  # 0.66
                     print('track{0} and track{1} overlap is {2}'.format(id1, id2, np.mean(overlap)))
                     dulplicate_track_list.append(id2)  # 可能是split当中的轨迹
     dulplicate_track_list = np.unique(dulplicate_track_list).tolist()  # 需要唯一
@@ -1729,7 +1707,7 @@ def stitching_tracklets(args,source,mapping_node_id_to_bbox,node_matching_dict,t
         curr_track = current_video_segment_predicted_tracks_bboxes[track_id]
         (x1,y1),(x2,y2) = curr_track[min(list(curr_track.keys()))]
         max_conf = np.max([current_video_segment_predicted_tracks_bboxes_test[track_id][node][2] for node in current_video_segment_predicted_tracks_bboxes_test[track_id]])
-        if max_conf < args.track_high_thresh:
+        if max_conf < args.track_high_thresh + 0.1 :
             curr_batch_invalid_list.append(track_id)
         flag = whether_on_border(x1,y1,x2,y2)
         if flag:
@@ -3685,7 +3663,7 @@ def tracks_combination(args,tracklet_inner_cnt,remained_tracks,result,result_sec
                 tracklet_bbox2 = np.array([frame_bbox2[frame] for frame in common_frames])
                 tracklet_overlap_matrix  = compute_iou_between_bbox_list(tracklet_bbox1.reshape(-1, 2, 2), tracklet_bbox2.reshape(-1, 2, 2))
                 overlap = np.diagonal(tracklet_overlap_matrix)
-                if np.mean(overlap) > 0.9:
+                if np.mean(overlap) > 0.8:
                     print('track{0} and track{1} overlap is {2}'.format(id1,id2,np.mean(overlap)))
                     id = id1 if len(frame_span1) < len(frame_span2) else id2 # id表示取其中frame_span更短的那一个
                     remove_list.append(id)
@@ -3878,7 +3856,7 @@ def detect(exp,args):
     else:
         files = [args.path]
     files.sort() # 对文件进行排序
-    files = files[298:]
+    #files = files[298:]
     if args.ablation:
         files = files[len(files) // 2 + 1:]
     predictor = Predictor(model, exp, args.device, args.fp16)
