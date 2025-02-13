@@ -1,0 +1,49 @@
+
+
+### 覆盖exp的参数
+#conf:
+#nms:
+#tsize:
+## debug相关参数
+debug: True  #  保存中间结果
+specific_clip:  # 只保留多少帧结果
+
+
+## 数据集以及相关配置
+benchmark : Avenue
+split: test
+dataset_dir: /media/allenyljiang/2CD8318DD83155F4/04_Dataset/AvenueDataset
+exp_file: /home/allenyljiang/Documents/SSP_EM/exps/example/anomaly_detection/yolox_x_avenue_ch.py
+seq_name: '10'
+## general
+
+
+## 检测、cmc、reid相关
+
+cmc_method: file
+fast_reid_config: /home/allenyljiang/Documents/SSP_EM/fast_reid/configs/MOT20/sbs_S50.yml
+fast_reid_weights: /home/allenyljiang/Documents/SSP_EM/models/mot20_sbs_S50.pth
+det_model_path: ./models/bytetrack_x_mot20.tar
+appearance_thresh: 0.25
+#proximity_thresh: 0.5
+
+## 系统参数
+trt: False
+fp16: True
+fuse: True
+device: cuda:0
+batch_size: 1
+
+## 跟踪关键参数
+match_thresh: 0.7
+track_high_thresh: 0.6
+track_low_thresh: 0.1
+track_buffer: 30
+#new_track_thresh = args.track_high_thresh + 0.1  # 0.7
+## 窗口滑动参数
+tracklet_len: 12
+batch_stride: 1
+batch_stride_write: 11
+tracklet_inner_cnt: 11
+
+# ssp_path,ssp_second_path,fixed_result_path,vis_result_path
