@@ -1,9 +1,11 @@
 /ablation
 /call
 /models/
+/fast_reid/
 /similarity_module/
 /statistic_information
 /YOLOX_outputs
+/yolox
 metrics_test.ipynb
 track.py
 result_gen.py
