@@ -1,0 +1,25 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+
+        {
+            "name": "Python Debugger: Current File with Arguments",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "args": [
+                "path","/media/allenyljiang/5234E69834E67DFB/Dataset/MOT20",
+                "exp_file","exps/example/mot/yolox_x_mix_mot20_ch.py",
+                "eval","train",
+                "ckpt","models/bytetrack_x_mot20.tar",
+                "benchmark","MOT20",
+                "fast-reid-weights","models/mot20_sbs_S50.pth"
+            ]
+        }
+    ]
+}
+// python3 tracker_MOT20.py --path /media/allenyljiang/5234E69834E67DFB/Dataset/MOT20 -f exps/example/mot/yolox_x_mix_mot20_ch.py --eval train -c models/bytetrack_x_mot20.tar --benchmark MOT20 --fast-reid-weights models/mot20_sbs_S50.pth
