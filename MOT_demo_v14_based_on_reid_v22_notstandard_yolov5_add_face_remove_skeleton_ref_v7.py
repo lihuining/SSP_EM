@@ -4539,45 +4539,8 @@ if __name__ == '__main__':
 
             exp.test_conf = max(0.001, args.track_low_thresh - 0.01) # 0.09
             detect(exp,args)
-    np.save('figs/'+args.benchmark+args.eval+'entropy_onestage.npy',entropy_one_stage)
-    np.save('figs/'+args.benchmark+args.eval+'entropy_two_stage_1.npy',entropy_two_stage_1)
-    np.save('figs/'+args.benchmark+args.eval+'entropy_two_stage_2.npy',entropy_two_stage_2)
     mainTimer.toc()
     print("TOTAL TIME END-to-END (with loading networks and images): ", mainTimer.total_time)
-    # print("TOTAL TIME (Detector + Tracker): " + str(timer.total_time) + ", FPS: " + str(1.0 /timer.average_time))
-    # print("TOTAL TIME (Tracker only): " + str(trackerTimer.total_time) + ", FPS: " + str(1.0 / trackerTimer.average_time))
-
-    # detect(opt,exp,args)
-
-
-    # tracemalloc.start(25)
-    # snapshot = tracemalloc.take_snapshot()
-    # # global snapshot
-    # gc.collect()
-    # snapshot1 = tracemalloc.take_snapshot()
-    # top_stats = snapshot1.compare_to(snapshot, 'lineno')
-    # logger.warning("[ Top 20 differences ]")
-    # for stat in top_stats[:20]:
-    #     if stat.size_diff < 0:
-    #         continue
-    #     logger.warning(stat)
-    # snapshot = tracemalloc.take_snapshot()
-    # /home/allenyljiang/Documents/Dataset/MOT20/train/MOT20-01/img1
-
-    # seq_path = '/home/allenyljiang/Documents/Dataset/MOT20'
-    # phase = 'test' # 'test'
-    # pattern = os.path.join(seq_path,phase,'*','img1')
-    # for source in glob.glob(pattern):
-    #     opt['source'] = source
-    #     detect(opt)
-
-    #snapshot = tracemalloc.take_snapshot()
-    # tracemalloc_snapshot(snapshot)
-    # snapshot = tracemalloc.take_snapshot() #  快照,当前内存分配
-    # # top_stats = snapshot.statistics('lineno') # 分开统计
-    # top_stats = snapshot.statistics('MOT_demo_v14_based_on_reid_v22_notstandard_yolov5_add_face_remove_skeleton_ref.py') # 统计整个文件内存vun
-    # for stat in top_stats:
-    #     print(stat)
 # 运行时间分析
 # pyinstrument -r html MOT_demo_v14_based_on_reid_v22_notstandard_yolov5_add_face_remove_skeleton_ref_v7.py
 # 内存监测

@@ -109,33 +109,3 @@ print('max aspect ratio is {},max width is {},max height is {}'.format(np.max(ma
 # print('mean',np.mean(iou_similarity_list))
 # print('min',np.min(iou_similarity_list))
 # print('variance',np.std(iou_similarity_list))
-
-
-
-#     for i in range(len(y)):
-#         cv2.circle(img,(int(y[i,0]),int(y[i,1])),8,color,-1)  # height：1080 width：1920 宽，高
-#     cv2.putText(img,str(int(unique_track_id[track_id])),(int(y[0,0]),int(y[0,1])),cv2.FONT_HERSHEY_SIMPLEX,2,(0,255,0),3)
-#     # cv2.imshow('track',img)
-#     # cv2.waitKey(0)
-# cv2.imwrite(dst_path,img)
-# print(track_length_list)
-### 轨迹统计误差的计算  ###
-# node_id_frame =
-# node_id_center = [(mapping_node_id_to_bbox[node_id][0][0][0] + mapping_node_id_to_bbox[node_id][0][1][0]) / 2,
-#                   (mapping_node_id_to_bbox[node_id][0][0][1] + mapping_node_id_to_bbox[node_id][0][1][1]) / 2]
-# polyfit_x = [x for x in predicted_tracks_centers[track_id].keys()]  # 以所在的帧数作为自变量
-# if node_id_frame in polyfit_x:  # 原来的轨迹已经包含该帧,很大概率原来的轨迹没有问题
-#     node_track_mapping_matrix[fix_node_list.index(node_id), common_tracks.index(track_id)] = 10000
-#     continue
-# polyfit_x.append(node_id_frame)
-# polyfit_x = np.unique(sorted(polyfit_x)).tolist()
-#
-# polyfit_y = [predicted_tracks_centers[track_id][frameid][0] for frameid in predicted_tracks_centers[track_id]]  # 水平拟合
-# polyfit_y.insert(polyfit_x.index(node_id_frame), node_id_center[0])  # index,obj
-# polyfit_z = [predicted_tracks_centers[track_id][frameid][1] for frameid in predicted_tracks_centers[track_id]]  # 垂直拟合
-# polyfit_z.insert(polyfit_x.index(node_id_frame), node_id_center[1])
-# # polyfit_x = range(len(predicted_tracks_centers)) # 总个数
-# # 大于2的时候才能进行拟合?
-# # if len(polyfit_x) > 2:
-# node_track_mapping_matrix[fix_node_list.index(node_id), common_tracks.index(track_id)] = \
-# np.polyfit(polyfit_x, polyfit_y, 1, full=True)[1][0] + np.polyfit(polyfit_x, polyfit_z, 1, full=True)[1][0]

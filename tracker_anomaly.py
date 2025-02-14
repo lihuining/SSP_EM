@@ -2,30 +2,18 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import lap
+import gc
 import contextlib
 import io
 import tempfile
 import yaml
 from loguru import logger
-import gc
-import tracemalloc
-import warnings
-
-from pympler import tracker
 from fast_reid.fast_reid_interfece import FastReIDInterface
-from memory_profiler import profile
-import objgraph
 import argparse
 import os
-import platform
 import shutil
-import time
-import pandas as pd
-from pathlib import Path
-from sklearn.decomposition import PCA
-
 from PIL import Image as Img
-from PIL import ImageTk
 import cv2
 import torch
 torch.cuda.empty_cache()
@@ -33,47 +21,23 @@ import torch.backends.cudnn as cudnn
 import torch.optim
 import torch.utils.data
 import torch.utils.data.distributed
-import torch.nn.functional as F
-import torchvision.transforms as transforms
-import torchvision
 from numpy import random
 import numpy as np
-import _thread
-import tkinter as tk
-from tkinter import Tk, Label
-import PIL.Image
-from tkinter import ttk
 from PIL import Image, ImageTk
 import time
 import math
 from subprocess import *
-import multiprocessing
 import copy
-import sys
 import os.path as osp
-import torch.nn as nn
-from similarity_module import torchreid
-from similarity_module.torchreid.utils import (
-    Logger, check_isfile, set_random_seed, collect_env_info,
-    resume_from_checkpoint, load_pretrained_weights, compute_model_complexity
-)
-from similarity_module.scripts.default_config import (
-    imagedata_kwargs, optimizer_kwargs, videodata_kwargs, engine_run_kwargs,
-    get_default_config, lr_scheduler_kwargs
-)
 import json
-from sklearn import metrics
-from tkinter import *
 from itertools import permutations
 #################################################### detector related import start ######################################################################
 import torch
-import torchvision
 import matplotlib
 matplotlib.use('TkAgg')
 import matplotlib.pyplot as plt
 ##### yolox #####
 from yolox.data.data_augment import preproc
-from yolox.core import launch
 from yolox.exp import get_exp
 from yolox.utils import configure_nccl, fuse_model, get_local_rank, get_model_info, setup_logger
 from yolox.evaluators import MOTEvaluator
@@ -85,6 +49,7 @@ from yolox.utils import (
     time_synchronized,
     xyxy2xywh
 )
+from yolox.tracker.ssp_tracker import SSPTracker
 from yolox.tracker import matching
 from tracker.tracking_utils.timer import Timer
 from tracker.gmc import GMC
@@ -104,10 +69,6 @@ current_video_segment_representative_frames_backup = {}
 current_video_segment_all_traj_all_object_features_backup = {}
 stitching_tracklets_dict = {}
 tracklet_pose_collection_large_temporal_stride_buffer = []
-curr_batch_img_buffer = {}
-entropy_one_stage = []
-entropy_two_stage_1 = []
-entropy_two_stage_2 = []
 tracklet_len = 10 # 滑动窗口长度
 median_filter_radius = 4
 num_samples_around_each_joint = 3
@@ -141,7 +102,42 @@ IMAGE_EXT = [".jpg", ".jpeg", ".webp", ".bmp", ".png"]
 # Global
 trackerTimer = Timer()
 timer = Timer()
-
+import sys
+sys.path.insert(0,"/home/allenyljiang/Documents/SSP_EM/yolox/")
+def write_vis_results(img_path,vis_folder, results):
+    '''
+    每张图片进行写入
+    '''
+    dst_dir = os.path.join(vis_folder, img_path.split('/')[-2],img_path.split('/')[-1])
+    if not os.path.exists(os.path.dirname(dst_dir)):
+        os.makedirs(os.path.dirname(dst_dir),exist_ok=True)
+    for frame_id, tlwhs, track_ids, scores in [results[-1]]: # write each frame information, only write the last frame
+        curr_img = cv2.imread(img_path)
+        for xyxy, track_id, score in zip(tlwhs, track_ids, scores):
+            if track_id < 0:
+                continue
+            x1, y1, x2, y2 = xyxy
+            left, top = int(x1), int(y1)
+            right, bottom = int(x2), int(y2)
+            if score > 0.6:
+                cv2.putText(curr_img, str(track_id), (left, top), cv2.FONT_HERSHEY_SIMPLEX, 1,(0,0 , 255), 2) # (字体大小i，颜色，字体粗细)
+            else:
+                cv2.putText(curr_img, str(track_id), (left, top), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2)
+            cv2.rectangle(curr_img, (left, top), (right, bottom), (0, 255, 0), 2)
+        cv2.imwrite(dst_dir,curr_img)
+def write_results(filename, results):
+    save_format = '{frame},{id},{x1},{y1},{w},{h},{s},-1,-1,-1\n'
+    with open(filename, 'w') as f:
+        for frame_id, tlwhs, track_ids, scores in results:
+            for xyxy, track_id, score in zip(tlwhs, track_ids, scores):
+                if track_id < 0:
+                    continue
+                x1, y1, x2, y2 = xyxy
+                w,h = abs(x2-x1),abs(y2-y1)
+                line = save_format.format(frame=frame_id, id=track_id, x1=round(x1, 1), y1=round(y1, 1), w=round(w, 1),
+                                          h=round(h, 1), s=round(score, 2))
+                f.write(line)
+    logger.info('save results to {}'.format(filename))
 def multi_gmc(dets, H=np.eye(2, 3)):
     if len(dets) > 0:
 
@@ -263,122 +259,6 @@ def track_processing(split_each_track,mapping_node_id_to_bbox,mapping_node_id_to
         mapping_frameid_to_confidence_score.clear()
     return curr_predicted_tracks_bboxes_test,trajectory_node_dict,trajectory_idswitch_dict,trajectory_idswitch_reliability_dict,trajectory_segment_nodes_dict
 
-def make_parser():
-    # python tools/demo_track.py -h 查看帮助信息/--help
-    # 使用时顺序无关紧要
-    parser = argparse.ArgumentParser("ByteTrack Demo!") # 创建解析对象
-    # -- 表示可选参数，其余表示必选参数
-    parser.add_argument(
-        "--demo", default="image", help="demo type, eg. image, video and webcam"
-    )
-    # exp file
-    parser.add_argument("-f", "--exp_file", type=str, default='exps/example/mot/yolox_x_mix_mot20_ch.py') # # 短选项，使用-f/--exp_file均可
-    parser.add_argument("-n", "--name", type=str, default=None, help="model name")
-    parser.add_argument(
-        "--path", default="/media/allenyljiang/564AFA804AFA5BE5/Dataset/MOT20", help="path to images or video"
-    ) #
-    # /home/allenyljiang/Documents/Dataset/MOT20
-    parser.add_argument("--camid", type=int, default=0, help="webcam demo camera id")
-    parser.add_argument("--benchmark", dest="benchmark", type=str, default='MOT20', help="benchmark to evaluate: MOT17 | MOT20")
-    parser.add_argument("--eval", dest="split_to_eval", type=str, default='train', help="split to evaluate: train | val | test")
-    parser.add_argument("-c", "--ckpt", default='pretrained/bytetrack_x_mot20.tar', type=str, help="ckpt for eval")
-    parser.add_argument("--default-parameters", dest="default_parameters", default=True, action="store_true", help="use the default parameters as in the paper")
-    #parser.add_argument("--save-frames", dest="save_frames", default=True, action="store_true", help="save sequences with tracks.")
-    # action表示--save_result标志存在时赋值为"store_true"
-    #### reid parameters ####
-    parser.add_argument("--with-reid", dest="with_reid", default=True, action="store_true", help="use Re-ID flag.")
-    parser.add_argument("--fast-reid-config", dest="fast_reid_config", default=r"/home/allenyljiang/Documents/SSP_EM/fast_reid/configs/MOT20/sbs_S50.yml", type=str, help="reid config file path")
-    parser.add_argument("--fast-reid-weights", dest="fast_reid_weights", default=r"/home/allenyljiang/Documents/SSP_EM/models/mot20_sbs_S50.pth", type=str, help="reid config file path")
-    parser.add_argument('--proximity_thresh', type=float, default=0.5, help='threshold for rejecting low overlap reid matches')
-    parser.add_argument('--appearance_thresh', type=float, default=0.25, help='threshold for rejecting low appearance similarity reid matches')
-    # #### osnet reid parameters ####
-    # parser.add_argument("--torch-reid-config", dest="torch_reid_config", default=r"similarity_module/configs/im_osnet_x0_25_softmax_256x128_amsgrad.yaml", type=str, help="reid config file path")
-    # parser.add_argument("--torch-reid-weights", dest="torch_reid_weights", default=r'similarity_module/model/osnet_x0_25_market_256x128_amsgrad_ep180_stp80_lr0.003_b128_fb10_softmax_labelsmooth_flip.pth', type=str, help="reid config file path")
-    # CMC
-    parser.add_argument("--cmc-method", default="file", type=str, help="cmc method: files (Vidstab GMC) | sparseOptFlow | orb | ecc | none")
-    # 设备
-    parser.add_argument(
-        "--device",
-        default="gpu",
-        type=str,
-        help="device to run our model, can either be cpu or gpu",
-    )
-    parser.add_argument(
-        "--local_rank", default=0, type=int, help="local rank for dist training"
-    )
-    parser.add_argument(
-        "--num_machines", default=1, type=int, help="num of node for training"
-    )
-    parser.add_argument(
-        "--machine_rank", default=0, type=int, help="node rank for multi-node training"
-    )
-    parser.add_argument("--conf", default=None, type=float, help="test conf")
-    parser.add_argument("--nms", default=None, type=float, help="test nms threshold")
-    parser.add_argument("--tsize", default=None, type=int, help="test img size")
-    parser.add_argument("--fps", default=30, type=int, help="frame rate (fps)")
-    parser.add_argument(
-        "--fp16",
-        dest="fp16",
-        default= True,
-        # action="store_true",
-        help="Adopting mix precision evaluating.",
-    )
-    parser.add_argument(
-        "--fuse",
-        dest="fuse",
-        default= True,
-        # action="store_true",
-        help="Fuse conv and bn for testing.",
-    )
-    parser.add_argument(
-        "--test",
-        dest="test",
-        default=False,
-        action="store_true",
-        help="Evaluating on test-dev set.",
-    )
-    parser.add_argument(
-        "--trt",
-        dest="trt",
-        default=False,
-        action="store_true",
-        help="Using TensorRT model for testing.",
-    )
-    parser.add_argument(
-        "--speed",
-        dest="speed",
-        default=False,
-        action="store_true",
-        help="speed test only.",
-    )
-    # tracking args
-    parser.add_argument("--track_high_thresh", type=float, default=0.6, help="tracking confidence threshold")
-    parser.add_argument("--track_low_thresh", default=0.1, type=float, help="lowest detection threshold valid for tracks")
-    parser.add_argument("--new_track_thresh", default=0.7, type=float, help="new track thresh")
-    # parser.add_argument("--track_thresh", type=float, default=0.5, help="tracking confidence threshold")
-    parser.add_argument("--track_buffer", type=int, default=30, help="the frames for keep lost tracks")
-    parser.add_argument("--match_thresh", type=float, default=0.8, help="matching threshold for tracking")
-    parser.add_argument(
-        "--aspect_ratio_thresh", type=float, default=1.6,help="threshold for filtering out boxes of which aspect ratio are above the given value."
-    )
-    parser.add_argument('--min_box_area', type=float, default=10, help='filter out tiny boxes')
-    parser.add_argument("--mot20", dest="mot20", default=False, action="store_true", help="test mot20.")
-    # statistic information
-    parser.add_argument("--initial_iou_thresh", type=float, default=0.55,help="initial iou thresh to filter ssp result.")
-    parser.add_argument("--iou_thresh_step", type=float, default=0.017,help="iou thresh step to filter ssp result.")
-    # sliding window parameters
-    parser.add_argument("--tracklet_len", type=int, default= 10 ,help="tracklet length")
-    parser.add_argument("--batch_stride", type=int, default= 9 ,help="batch stride")
-    parser.add_argument("--batch_stride_write", type=int, default= 9 ,help="batch stride write")
-    parser.add_argument("--tracklet_inner_cnt", type=int, default= 9 ,help="tracklet_inner_cnt")
-    # 结果可视化
-    parser.add_argument('--save-result', dest="save_result",default=False,
-                        help='whether save the visualizition result')  # python demo.py --save-result 启用该参数
-    parser.set_defaults(save_result = True)
-    # 新增异常检测的跟踪结果
-
-    return parser
-
 
 def get_image_list(path):
     image_names = []
@@ -389,20 +269,6 @@ def get_image_list(path):
             if ext in IMAGE_EXT:
                 image_names.append(apath)
     return image_names
-
-
-def write_results(filename, results):
-    save_format = '{frame},{id},{x1},{y1},{w},{h},{s},-1,-1,-1\n'
-    with open(filename, 'w') as f:
-        for frame_id, tlwhs, track_ids, scores in results:
-            for tlwh, track_id, score in zip(tlwhs, track_ids, scores):
-                if track_id < 0:
-                    continue
-                x1, y1, w, h = tlwh
-                line = save_format.format(frame=frame_id, id=track_id, x1=round(x1, 1), y1=round(y1, 1), w=round(w, 1), h=round(h, 1), s=round(score, 2))
-                f.write(line)
-    logger.info('save results to {}'.format(filename))
-
 
 class Predictor(object):
     def __init__(
@@ -452,20 +318,6 @@ class Predictor(object):
             outputs = postprocess(outputs, self.num_classes,self.confthre, self.nmsthre) # (40,7),self.confthre = 0.09,
 
         return outputs, img_info
-
-def tracemalloc_snapshot(snapshot1):
-    snapshot2 = tracemalloc.take_snapshot()
-    top_stats = snapshot2.compare_to(snapshot1, 'lineno')
-
-    print('top 10 differences')
-    for stat in top_stats[:10]:
-        print(stat)
-
-def single_snapshot():
-    snapshot = tracemalloc.take_snapshot()
-    top_stats = snapshot.statistics('lineno')
-    for stat in top_stats[:15]:
-        print(stat)
 
 def box_to_center_scale(box, model_image_width, model_image_height):
     """convert a box to center,scale information required for pose transformation
@@ -612,7 +464,6 @@ def tracking(mapping_node_id_to_bbox, mapping_edge_id_to_cost, tracklet_inner_cn
 
 
     tracking_start_time = time.time()
-    gc.collect()
     p = Popen('call/call', stdin=PIPE, stdout=PIPE, encoding='gbk')
     result = p.communicate(input=transfer_data_to_tracker)
     p.terminate()
@@ -859,7 +710,7 @@ def compute_inter_person_similarity_worker(files,input_list, whether_use_iou_sim
         # similarity is inversely proportional to matching error
         person_to_person_matching_matrix = 1.0 / person_to_person_matching_matrix / np.max(
             1.0 / person_to_person_matching_matrix)  # similarity
-        person_to_person_matching_matrix_offset = 1.0 /person_to_person_matching_matrix_offset / np.max(1.0 / person_to_person_matching_matrix_offset)
+        #person_to_person_matching_matrix_offset = 1.0 /person_to_person_matching_matrix_offset / np.max(1.0 / person_to_person_matching_matrix_offset)
     # similarity is the summation of appearance and iou similarity
     if whether_use_iou_similarity_or_not and whether_use_reid_similarity_or_not:
         person_to_person_matching_matrix = person_to_person_matching_matrix * person_to_person_matching_matrix_iou #*person_to_person_matching_matrix_offset# +person_to_person_matching_matrix_offset # *person_to_person_matching_matrix_confidence # * person_to_person_depth_matching_matrix_iou
@@ -930,93 +781,7 @@ def cosine_similarity(vec1,vec2):
     cos = num / denom  # cosine similarity
     return cos
 
-def batch_track_regression(track1,frame_start,frame_end,frame_span1):
-    '''
-    track1:previous_video_segment_predicted_tracks_bboxes_test
-    start,end:regression start and end
-    frame_span:original frame span (true detections)
-    '''
-    frame_bbox1 = {int(track1[node][0].split('.')[0]): track1[node][1] for node in track1}  # key:frame(int) value:bbox
-    if set(range(frame_start,frame_end+1)) < set(frame_bbox1) : # 此时不需要进行回归,start到end内的元素均已有，此时不需要回归
-        frame_bbox1 = dict(sorted(frame_bbox1.items(), key=operator.itemgetter(0))) # in order
-        return frame_bbox1
-    width1 = np.mean([frame_bbox1[frame][1][0] - frame_bbox1[frame][0][0] for frame in frame_bbox1])
-    height1 = np.mean([frame_bbox1[frame][1][1] - frame_bbox1[frame][0][1] for frame in frame_bbox1])
-    horicenter_coordinates1 = (np.array(
-        [frame_bbox1[frame][1][0] + frame_bbox1[frame][0][0] for frame in frame_bbox1]) / 2.0).tolist()  # 水平
-    vertcenter_coordinates1 = (np.array(
-        [frame_bbox1[frame][1][1] + frame_bbox1[frame][0][1] for frame in frame_bbox1]) / 2.0).tolist()  # 垂直
-    horicenter_fitter_coefficients = np.polyfit(frame_span1, horicenter_coordinates1, 1)
-    vertcenter_fitter_coefficients = np.polyfit(frame_span1, vertcenter_coordinates1, 1)
-    horicenter_fitter = np.poly1d(horicenter_fitter_coefficients)  # np.poly1d根据数组生成一个多项式
-    vertcenter_fitter = np.poly1d(vertcenter_fitter_coefficients)
-    for frame in range(frame_start, frame_end + 1):
-        if frame in frame_bbox1:  # 已经存在
-            continue
-        else:  #
-            frame_bbox1[frame] = [
-                (horicenter_fitter(float(frame)) - width1 / 2.0, vertcenter_fitter(float(frame)) - height1 / 2.0),
-                (horicenter_fitter(float(frame)) + width1 / 2.0, vertcenter_fitter(float(frame)) + height1 / 2.0)]
-    # frame_bbox1 = dict(sorted(frame_bbox1.items(),key=lambda d:d[0]))
-    # frame_bbox1 = sorted(frame_bbox1)
-    frame_bbox1 = dict(sorted(frame_bbox1.items(), key=operator.itemgetter(0)))  # 按照key值升序,从而使得计算iou的时候帧数是对应的
-    return frame_bbox1
-
-def stitching_tracklets_revised_bidirectional(previous_bboxes_test,current_bboxes_test):
-    dists = np.zeros((len(previous_bboxes_test), len(current_bboxes_test)))
-    ###### 对于小于2的如何计算相似度 ######
-    '''
-    1 在上一个阶段删除小于2的tracklet
-    2 小于2的tracklet采用和下一个track第1帧来计算相似度
-    '''
-    previous_tracks_id = list(previous_bboxes_test.keys())
-    current_tracks_id = list(current_bboxes_test.keys())
-    for id1 in previous_bboxes_test:
-        for id2 in current_bboxes_test:
-            track1 = previous_bboxes_test[id1]
-            frame_span1 = [int(track1[node][0].split('.')[0]) for node in track1] # 自变量
-            track2 = current_bboxes_test[id2]
-            frame_span2 = [int(track2[node][0].split('.')[0]) for node in track2]
-            if len(previous_bboxes_test[id1]) < 3 or len(current_bboxes_test[id2]) < 3:  # 小于2的时候无法进行回归
-                '''
-                无法回归的时候采用iou相似度
-                '''
-                bbox1 = track1[max(list(track1.keys()))][1]
-                bbox2 = track2[min(list(track2.keys()))][1]
-                # [former_bbox[0][1], former_bbox[1][1], former_bbox[0][0], former_bbox[1][0]]
-                dists[previous_tracks_id.index(id1), current_tracks_id.index(id2)] = 1 - compute_iou_single_box([bbox1[0][1],bbox1[1][1],bbox1[0][0],bbox1[1][0]],[bbox2[0][1],bbox2[1][1],bbox2[0][0],bbox2[1][0]]) #
-            # tmp_span = frame_span1 + frame_span2
-            # frame_start,frame_end = min(frame_span1+frame_span2),max(frame_span1+frame_span2)
-            frame_start,frame_end = max(frame_span1),min(frame_span2)
-            frame_span = list(range(frame_start, frame_end + 1)) #  两个batch的frame范围
-            frame_bbox1 = batch_track_regression(track1,frame_start,frame_end,frame_span1)
-            frame_bbox2 = batch_track_regression(track2, frame_start, frame_end,frame_span2)
-            ### regression ##
-            ### 从最小的frame到最大的frame计算相似度 ###
-            #### 注意两个轨迹段比较的帧一定要对应 ####
-            tracklet1 = np.array([frame_bbox1[frame] for frame in frame_span])
-            tracklet2 = np.array([frame_bbox2[frame] for frame in frame_span])
-            tracklet_ious_matrix  = compute_iou_between_bbox_list(tracklet1.reshape(-1, 2, 2), tracklet2.reshape(-1, 2, 2))
-            # tracklet_overlap_matrix = compute_overlap_between_bbox_list(tracklet1.reshape(-1, 2, 2), tracklet2.reshape(-1, 2, 2))
-            ious = np.diagonal(tracklet_ious_matrix)
-            # print('track{0} and track{1} iou is {2}'.format(id1,id2,np.mean(ious)))
-            dists[previous_tracks_id.index(id1), current_tracks_id.index(id2)] = 1 - np.mean(ious[frame_span.index(max(frame_span1)):frame_span.index(min(frame_span2))+1])  # 前一个轨迹最后一帧与当前轨迹最前面一帧
-    matched_indices, previous_unmatched_ids, curr_unmatched_ids = linear_assignment(dists, thresh= 0.3) # ???
-    result_dict = {}
-    previous_unmatched_tracks = []
-    curr_unmatched_tracks = []
-    for m in matched_indices:
-        # 对matched_indices进行判断
-        result_dict[current_tracks_id[m[1]]] = previous_tracks_id[m[0]]
-    # print(np.mean(mean_similarity_list))
-    for track_id in previous_unmatched_ids:
-        previous_unmatched_tracks.append(previous_tracks_id[track_id])
-
-    for track_id in curr_unmatched_ids:
-        curr_unmatched_tracks.append(current_tracks_id[track_id])
-    return  result_dict,previous_unmatched_tracks,curr_unmatched_tracks
-
-def stitching_tracklets(mapping_node_id_to_bbox,node_matching_dict,tracklet_inner_cnt, current_video_segment_predicted_tracks, previous_video_segment_predicted_tracks, current_video_segment_predicted_tracks_bboxes, previous_video_segment_predicted_tracks_bboxes, current_video_segment_representative_frames, previous_video_segment_representative_frames,current_video_segment_predicted_tracks_bboxes_test,previous_video_segment_predicted_tracks_bboxes_test,unmatched_tracks_memory_dict):
+def stitching_tracklets(current_video_segment_predicted_tracks, previous_video_segment_predicted_tracks, current_video_segment_predicted_tracks_bboxes, previous_video_segment_predicted_tracks_bboxes,current_video_segment_predicted_tracks_bboxes_test,previous_video_segment_predicted_tracks_bboxes_test):
     # split one trajectory into two if box in t-1 has iou with box in t lower than split_single_trajectory_thresh if split one into three ?
     # for current_video_segment_predicted_tracks_bboxes_key in [x for x in current_video_segment_predicted_tracks_bboxes.keys()]:
     #     for time_idx in range(len(current_video_segment_predicted_tracks_bboxes[current_video_segment_predicted_tracks_bboxes_key]) - 1):
@@ -1219,22 +984,7 @@ def stitching_tracklets(mapping_node_id_to_bbox,node_matching_dict,tracklet_inne
     # rows = np.min(tracklets_similarity_matrix,1)
     # min_index = np.argmin(tracklets_similarity_matrix,1) # 每行最小值索引,index表示其行数
     result_dict = {}
-    ##### 对轨迹预测结果进行可视化#####
-    unique_frame_list = sorted(np.unique([mapping_node_id_to_bbox[x][2] for x in mapping_node_id_to_bbox]))
-    # if not os.path.exists(os.path.join(source.split(source.split('/')[-1])[0], 'results_all', source.split('/')[-1] + '_3dpolyfit_vis/')):
-    #     os.makedirs(os.path.join(source.split(source.split('/')[-1])[0], 'results_all', source.split('/')[-1] + '_3dpolyfit_vis/'))
-    # for frame_name in unique_frame_list:
-    #     curr_img = cv2.imread(os.path.join(source, frame_name))
-    #     for trackid in predicted_bbox_based_on_historical_traj:
-    #         if frame_name in predicted_bbox_based_on_historical_traj[trackid]:
-    #             top,bottom,left,right = predicted_bbox_based_on_historical_traj[trackid][frame_name]
-    #             top2, bottom2, left2, right2 = predicted_bbox_based_on_historical_traj2[trackid][frame_name]
-    #             cv2.rectangle(curr_img, (int(left), int(top)), (int(right), int(bottom)), (255, 0, 0), 2) # 蓝色为一阶拟合结果
-    #             cv2.rectangle(curr_img, (int(left2), int(top2)), (int(right2), int(bottom2)), (0, 0, 255), 2) # 红色为二阶拟合结果
-    #             cv2.putText(curr_img, str(trackid), (int(left), int(top)), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 255, 0), 3)
-    #     cv2.imwrite(os.path.join(source.split(source.split('/')[-1])[0], 'results_all', source.split('/')[-1] + '_3dpolyfit_vis/')  + frame_name, curr_img)
-    # for i in range(np.size(tracklets_similarity_matrix,1)): # 行表示前一个batch,列表示当前batch
-    #     result_dict_min[i+1] = min_index.tolist().index(i)+1 # 当前轨迹id与之前轨迹id对应关系  可能存在不对应的情况
+
     # 需要计算匹配的轨迹以及当前帧当中新出现的轨迹以及上一帧中没有匹配到的轨迹
     # 设置阈值
     iou_mask = np.where(tracklets_similarity_matrix > 0.7)
@@ -1808,234 +1558,6 @@ def compute_reid_vector_distance(pre_vector, post_vector):
     cos = num / denom
     return 1.0 - cos
 
-################################################################################################################################################
-# Given two halves in different trajectories, determine whether need to hybridize
-# Input:
-# pairs_correction_relationships: a dict, each key is the index of one trajectory, each value is a list [ending node name (character) of the first half, starting node name of the second half]
-# pairs_correction_two_halves: a dict, each key is the index of one trajectory, each value is a list [the first half, the second half]
-#      the first half is a list of element each of which is a list with two characters of node names, the second half is in the same format
-# split_each_track is a dict, each key is an index of a trajectory, the value is a list of nodes in one trajectory, each node is a list with two integers
-# split_each_track_valid_mask is a dict, the keys are the same as split_each_track_valid, the value under each key is a bool number indicating the validity of the node
-# need_to_fix_cnt is an integer indicating whether current sets of trajectories need hybridization, if need, need_to_fix_cnt is set to be larger than 0, if no fixing is required, need_to_fix_cnt is kept 0
-# return_to_while is True when need_to_fix_cnt is set to be larger than 0
-# result is the fixed string encoding all trajectories
-# maximum_possible_number is math.exp(10)
-# mapping_node_id_to_bbox: a dict, each key is a character of node name, each value is a list whose first element is bounding box coordinates, second
-# element is confidence, third element is frame name string, refer to the supplementary materials
-# mapping_node_id_to_features: a dict, each key is a character is node name, each value is an 512-d array storing a feature vector
-# mapping_edge_id_to_cost: a dict, each key is a string with '_' connecting two characters each of which is a character of one node name, refer to the supplementary materials
-
-def flat_area_optimize(pairs_correction_relationships, pairs_correction_two_halves, split_each_track, split_each_track_valid_mask, need_to_fix_cnt, return_to_while, result, maximum_possible_number, mapping_edge_id_to_cost, mapping_node_id_to_bbox, mapping_node_id_to_features):
-    # For example, in
-    # [... Ai, Ai+j,...]
-    # [... Bi, Bi+j,...]
-    # left_nodes is [Ai, Bi], right_nodes is [Ai+j, Bi+j]
-    left_nodes = [pairs_correction_relationships[x][0] for x in pairs_correction_relationships.keys()]
-    right_nodes = [pairs_correction_relationships[x][1] for x in pairs_correction_relationships.keys()]
-    # Backup the two lists
-    left_nodes_backup = copy.deepcopy(left_nodes)
-    right_nodes_backup = copy.deepcopy(right_nodes)
-    # print(left_nodes)
-    # print(right_nodes)
-    # replace left nodes with previous more confident ones
-    # each trajectory has multiple nodes, each node is a bounding box with confidence, for each left node, we find the bounding box in its trajectory
-    # with the highest confidence for representing its appearance
-    # For example, in
-    # [...Ak... Ai, Ai+j, ...Ah...]
-    # [...Bp... Bi, Bi+j, ...Bq...]
-    # we find that Ak has highest confidence in the first half of the first trajectory, Ah, Bp, Bq all have highest confidences in correponding halves,
-    # we compute matching error between [Ak, Ah], [Ak, Bq], [Bp, Ah], [Bp, Bq]
-    # left_nodes_prev_seqs is a list, each element is a cut half of an original trajectory, example:
-    # [...Ak... Ai]
-    # [...Bp... Bi]
-    # each Ak, Ai, Bp, Bi is a list of two integers, if the former one is odd and latter one is even, then the element represents one bounding box, else it represents one edge
-    # left_nodes_prev_seq_confidences is a list, each element is a cut half of an original trajectory, example:
-    # [...Ak... Ai]
-    # [...Bp... Bi]
-    # each Ak, Ai, Bp, Bi is a floating confidence value
-    # left_nodes stores the node which highest confidence in each trajectory, example:
-    # [Ak]
-    # [Bp]
-    left_nodes_prev_seqs = [pairs_correction_two_halves[x][0] for x in pairs_correction_relationships.keys()]
-    if None not in left_nodes_prev_seqs:
-        for left_nodes_prev_seq_idx in range(len(left_nodes_prev_seqs)):
-            left_nodes_prev_seq_confidences = []
-            for candidate_node in left_nodes_prev_seqs[left_nodes_prev_seq_idx]:
-                # each element in left_nodes_prev_seqs[left_nodes_prev_seq_idx] is a list of two integers, if the former one is odd and latter one is
-                # even, then the element represents one bounding box, else it represents one edge
-                if int(candidate_node[0]) % 2 == 1 and int(candidate_node[1]) % 2 == 0:
-                    left_nodes_prev_seq_confidences.append(mapping_node_id_to_bbox[int(int(candidate_node[1]) / 2)][1])
-                else:
-                    left_nodes_prev_seq_confidences.append(0.0)
-            left_nodes[left_nodes_prev_seq_idx] = left_nodes_prev_seqs[left_nodes_prev_seq_idx][np.argmax(left_nodes_prev_seq_confidences)][1]
-    right_node_post_seqs = [pairs_correction_two_halves[x][1] for x in pairs_correction_relationships.keys()]
-    if None not in right_node_post_seqs:
-        for right_nodes_post_seq_idx in range(len(right_node_post_seqs)):
-            right_nodes_post_seq_confidences = []
-            for candidate_node in right_node_post_seqs[right_nodes_post_seq_idx]:
-                if int(candidate_node[0]) % 2 == 1 and int(candidate_node[1]) % 2 == 0:
-                    right_nodes_post_seq_confidences.append(mapping_node_id_to_bbox[int(int(candidate_node[1]) / 2)][1])
-                else:
-                    right_nodes_post_seq_confidences.append(0.0)
-            right_nodes[right_nodes_post_seq_idx] = right_node_post_seqs[right_nodes_post_seq_idx][np.argmax(right_nodes_post_seq_confidences)][1]
-
-    # assert (len(left_nodes) == len(np.unique(left_nodes)))
-    # assert (len(right_nodes) == len(np.unique(right_nodes)))
-    all_possible_correct_pairs = []
-    all_possible_correct_pairs_ori = []
-    # permutate to try all pairs for hybridization
-    all_possible_pairing_orders = list(permutations(range(0, len(left_nodes))))
-    for one_possible_pairing_orders in all_possible_pairing_orders:
-        one_possible_correct_pairs = []
-        # each element in one_possible_correct_pairs is a list of two nodes, the former from one left half, the latter from one right half
-        for left_nodes_idx in range(len(left_nodes)):
-            one_possible_correct_pairs.append([left_nodes[left_nodes_idx], right_nodes[one_possible_pairing_orders[left_nodes_idx]]])
-        if len(one_possible_correct_pairs) > 0:
-            all_possible_correct_pairs.append(one_possible_correct_pairs)
-        # afraid of all_possible_correct_pairs being modified
-        one_possible_correct_pairs_ori = []
-        for left_nodes_idx in range(len(left_nodes_backup)):
-            one_possible_correct_pairs_ori.append([left_nodes_backup[left_nodes_idx], right_nodes_backup[one_possible_pairing_orders[left_nodes_idx]]])
-        if len(one_possible_correct_pairs_ori) > 0:
-            all_possible_correct_pairs_ori.append(one_possible_correct_pairs_ori)
-    # add additional possible combiations
-    # ori: A-C, B-D, E-F,  revised: A-D-C, B-, E-F
-    pairs_correction_two_halves_revised_list = []
-    add_all_possible_correct_pairs = []
-    for right_nodes_backup_idx in range(len(right_nodes_backup)):
-        right_nodes_backup_key = [x for x in pairs_correction_two_halves][right_nodes_backup_idx]
-        curr_right_node = right_nodes_backup[right_nodes_backup_idx]
-        for left_nodes_backup_idx in [x for x in range(len(left_nodes_backup)) if x != right_nodes_backup_idx]:
-            pairs_correction_two_halves_revised = {}
-            for pairs_correction_two_halves_key in pairs_correction_two_halves:
-                pairs_correction_two_halves_revised[pairs_correction_two_halves_key] = pairs_correction_two_halves[pairs_correction_two_halves_key]
-            left_nodes_backup_key = [x for x in pairs_correction_two_halves][left_nodes_backup_idx]
-            new_sequence_with_curr_right_node_inserted = pairs_correction_two_halves[left_nodes_backup_key]
-            one_possible_correct_pairs = []
-            if (None in pairs_correction_two_halves[right_nodes_backup_key]) or (None in pairs_correction_two_halves[left_nodes_backup_key]):
-                continue
-            if len([x for x in new_sequence_with_curr_right_node_inserted[0] if (int(pairs_correction_two_halves[right_nodes_backup_key][1][0][0]) > int(x[0]) and int(pairs_correction_two_halves[right_nodes_backup_key][1][-1][1]) < int(x[1]))]) > 0:
-                new_sequence_with_curr_right_node_inserted_insert_location = new_sequence_with_curr_right_node_inserted[0].index([x for x in new_sequence_with_curr_right_node_inserted[0] if (int(pairs_correction_two_halves[right_nodes_backup_key][1][0][0]) > int(x[0]) and int(pairs_correction_two_halves[right_nodes_backup_key][1][-1][1]) < int(x[1]))][0])
-                new_sequence_with_curr_right_node_inserted[0] = new_sequence_with_curr_right_node_inserted[0][:new_sequence_with_curr_right_node_inserted_insert_location] + \
-                                                                [[new_sequence_with_curr_right_node_inserted[0][new_sequence_with_curr_right_node_inserted_insert_location][0], pairs_correction_two_halves[right_nodes_backup_key][1][0][0]]] + \
-                                                                pairs_correction_two_halves[right_nodes_backup_key][1] + \
-                                                                [[pairs_correction_two_halves[right_nodes_backup_key][1][-1][1], new_sequence_with_curr_right_node_inserted[0][new_sequence_with_curr_right_node_inserted_insert_location][1]]] + \
-                                                                new_sequence_with_curr_right_node_inserted[0][new_sequence_with_curr_right_node_inserted_insert_location + 1:]
-                one_possible_correct_pairs.append([new_sequence_with_curr_right_node_inserted[0][new_sequence_with_curr_right_node_inserted_insert_location][0], pairs_correction_two_halves[right_nodes_backup_key][1][0][0]])
-                one_possible_correct_pairs.append([left_nodes_backup[left_nodes_backup_idx], right_nodes_backup[left_nodes_backup_idx]])
-                pairs_correction_two_halves_revised[right_nodes_backup_key][1] = None
-            elif len([x for x in new_sequence_with_curr_right_node_inserted[1] if (int(pairs_correction_two_halves[right_nodes_backup_key][1][0][0]) > int(x[0]) and int(pairs_correction_two_halves[right_nodes_backup_key][1][-1][1]) < int(x[1]))]) > 0:
-                new_sequence_with_curr_right_node_inserted_insert_location = new_sequence_with_curr_right_node_inserted[1].index([x for x in new_sequence_with_curr_right_node_inserted[1] if (int(pairs_correction_two_halves[right_nodes_backup_key][1][0][0]) > int(x[0]) and int(pairs_correction_two_halves[right_nodes_backup_key][1][-1][1]) < int(x[1]))][0])
-                new_sequence_with_curr_right_node_inserted[1] = new_sequence_with_curr_right_node_inserted[1][:new_sequence_with_curr_right_node_inserted_insert_location] + \
-                                                                [[new_sequence_with_curr_right_node_inserted[1][new_sequence_with_curr_right_node_inserted_insert_location][0], pairs_correction_two_halves[right_nodes_backup_key][1][0][0]]] + \
-                                                                pairs_correction_two_halves[right_nodes_backup_key][1] + \
-                                                                [[pairs_correction_two_halves[right_nodes_backup_key][1][-1][1], new_sequence_with_curr_right_node_inserted[1][new_sequence_with_curr_right_node_inserted_insert_location][1]]] + \
-                                                                new_sequence_with_curr_right_node_inserted[1][new_sequence_with_curr_right_node_inserted_insert_location + 1:]
-                one_possible_correct_pairs.append([new_sequence_with_curr_right_node_inserted[1][new_sequence_with_curr_right_node_inserted_insert_location][0], pairs_correction_two_halves[right_nodes_backup_key][1][0][0]])
-                one_possible_correct_pairs.append([left_nodes_backup[left_nodes_backup_idx], right_nodes_backup[left_nodes_backup_idx]])
-                pairs_correction_two_halves_revised[right_nodes_backup_key][1] = None
-            else:
-                continue
-            pairs_correction_two_halves_revised[left_nodes_backup_key] = new_sequence_with_curr_right_node_inserted
-            for other_nodes_idx in [x for x in range(len(left_nodes_backup)) if (x != right_nodes_backup_idx and x != left_nodes_backup_idx)]:
-                one_possible_correct_pairs.append([left_nodes_backup[other_nodes_idx], right_nodes_backup[other_nodes_idx]])
-                other_nodes_key = [x for x in pairs_correction_two_halves][other_nodes_idx]
-                pairs_correction_two_halves_revised[other_nodes_key] = pairs_correction_two_halves[other_nodes_key]
-            add_all_possible_correct_pairs.append(one_possible_correct_pairs)
-            pairs_correction_two_halves_revised_list.append(pairs_correction_two_halves_revised)
-    # add additional possible combinations
-
-    #### minimize loss
-    # compute the matching error between all pairs
-    all_possible_correct_pairs_loss = [maximum_possible_number * len(all_possible_correct_pairs[0])] * len(all_possible_correct_pairs)
-    for all_possible_correct_pairs_idx in range(len(all_possible_correct_pairs)):
-        curr_combination_loss = 0.0
-        for all_possible_correct_pairs_idx_ele in range(len(all_possible_correct_pairs[all_possible_correct_pairs_idx])):
-            pre_node = int(int(all_possible_correct_pairs[all_possible_correct_pairs_idx][all_possible_correct_pairs_idx_ele][0]) / 2)
-            post_node = int((int(all_possible_correct_pairs[all_possible_correct_pairs_idx][all_possible_correct_pairs_idx_ele][1]) + 1) / 2)
-            if pre_node in mapping_node_id_to_features and post_node in mapping_node_id_to_features:
-                curr_combination_loss += compute_reid_vector_distance(mapping_node_id_to_features[pre_node], mapping_node_id_to_features[post_node])
-            else:
-                curr_combination_loss += maximum_possible_number
-            # if str(pre_node) + '_' + str(post_node) in mapping_edge_id_to_cost:
-            #     curr_combination_loss += mapping_edge_id_to_cost[str(pre_node) + '_' + str(post_node)]
-            # else:
-            #     curr_combination_loss += maximum_possible_number
-        all_possible_correct_pairs_loss[all_possible_correct_pairs_idx] = curr_combination_loss
-
-    # add additional possible combiations
-    add_all_possible_correct_pairs_loss = []
-    if len(add_all_possible_correct_pairs) > 0:
-        add_all_possible_correct_pairs_loss = [maximum_possible_number * len(add_all_possible_correct_pairs[0])] * len(add_all_possible_correct_pairs)
-        for all_possible_correct_pairs_idx in range(len(add_all_possible_correct_pairs)):
-            curr_combination_loss = 0.0
-            for all_possible_correct_pairs_idx_ele in range(len(add_all_possible_correct_pairs[all_possible_correct_pairs_idx])):
-                pre_node = int(int(add_all_possible_correct_pairs[all_possible_correct_pairs_idx][all_possible_correct_pairs_idx_ele][0]) / 2)
-                post_node = int((int(add_all_possible_correct_pairs[all_possible_correct_pairs_idx][all_possible_correct_pairs_idx_ele][1]) + 1) / 2)
-                if pre_node in mapping_node_id_to_features and post_node in mapping_node_id_to_features:
-                    curr_combination_loss += compute_reid_vector_distance(mapping_node_id_to_features[pre_node], mapping_node_id_to_features[post_node])
-                else:
-                    curr_combination_loss += maximum_possible_number
-            add_all_possible_correct_pairs_loss[all_possible_correct_pairs_idx] = curr_combination_loss
-
-    if len(add_all_possible_correct_pairs) > 0 and np.min(add_all_possible_correct_pairs_loss) < np.min(all_possible_correct_pairs_loss):
-        pairs_correction_two_halves = pairs_correction_two_halves_revised_list[np.argmin(add_all_possible_correct_pairs_loss)]
-        for pairs_correction_two_halves_key in pairs_correction_two_halves:
-            if None not in pairs_correction_two_halves[pairs_correction_two_halves_key]:
-                split_each_track[pairs_correction_two_halves_key] = pairs_correction_two_halves[pairs_correction_two_halves_key][0] + \
-                                                                    [[pairs_correction_two_halves[pairs_correction_two_halves_key][0][-1][1], pairs_correction_two_halves[pairs_correction_two_halves_key][1][0][0]]] + \
-                                                                    pairs_correction_two_halves[pairs_correction_two_halves_key][1]
-                need_to_fix_cnt += 1
-                return_to_while = True
-                result[0] = 'Predicted tracks' + '\n' + convert_dict_to_str(result, split_each_track)
-                split_each_track, split_each_track_valid_mask = update_split_each_track_valid_mask(result)
-            elif pairs_correction_two_halves[pairs_correction_two_halves_key][0] is not None and pairs_correction_two_halves[pairs_correction_two_halves_key][1] is None:
-                split_each_track[pairs_correction_two_halves_key] = pairs_correction_two_halves[pairs_correction_two_halves_key][0]
-                need_to_fix_cnt += 1
-                return_to_while = True
-                result[0] = 'Predicted tracks' + '\n' + convert_dict_to_str(result, split_each_track)
-                split_each_track, split_each_track_valid_mask = update_split_each_track_valid_mask(result)
-            elif pairs_correction_two_halves[pairs_correction_two_halves_key][0] is None and pairs_correction_two_halves[pairs_correction_two_halves_key][1] is not None:
-                split_each_track[pairs_correction_two_halves_key] = pairs_correction_two_halves[pairs_correction_two_halves_key][1]
-                need_to_fix_cnt += 1
-                return_to_while = True
-                result[0] = 'Predicted tracks' + '\n' + convert_dict_to_str(result, split_each_track)
-                split_each_track, split_each_track_valid_mask = update_split_each_track_valid_mask(result)
-    # add additional possible combiations end
-    else:
-        pairs_decision = all_possible_correct_pairs_ori[np.argmin(all_possible_correct_pairs_loss)]
-        for trajectory_first_half_key in pairs_correction_two_halves:
-            for trajectory_second_half_key in [y for y in pairs_correction_two_halves.keys() if y != trajectory_first_half_key]:
-                # if current hybridization with two halves from two trajectories is pairs_decision with minimum loss
-                if pairs_correction_two_halves[trajectory_first_half_key][0] is not None and \
-                        pairs_correction_two_halves[trajectory_second_half_key][1] is not None and \
-                        [pairs_correction_two_halves[trajectory_first_half_key][0][-1][1], pairs_correction_two_halves[trajectory_second_half_key][1][0][0]] in pairs_decision:
-                    # the ending element of first half is a node representing a bbox, the starting element of second half is a node representing a bbox, we need to build a node
-                    # representing an edge between the two bboxes
-                    split_each_track[trajectory_first_half_key] = pairs_correction_two_halves[trajectory_first_half_key][0] + \
-                                                                  [[pairs_correction_two_halves[trajectory_first_half_key][0][-1][1], pairs_correction_two_halves[trajectory_second_half_key][1][0][0]]] + \
-                                                                  pairs_correction_two_halves[trajectory_second_half_key][1]
-                    need_to_fix_cnt += 1
-                    return_to_while = True
-                    result[0] = 'Predicted tracks' + '\n' + convert_dict_to_str(result, split_each_track)
-                    split_each_track, split_each_track_valid_mask = update_split_each_track_valid_mask(result)
-                elif pairs_correction_two_halves[trajectory_first_half_key][0] is not None and \
-                        pairs_correction_two_halves[trajectory_second_half_key][1] is None and \
-                        [pairs_correction_two_halves[trajectory_first_half_key][0][-1][1], str(int(max([int(x) for x in mapping_node_id_to_bbox.keys()])) * 4)] in pairs_decision:
-                    split_each_track[trajectory_first_half_key] = pairs_correction_two_halves[trajectory_first_half_key][0]
-                    need_to_fix_cnt += 1
-                    return_to_while = True
-                    result[0] = 'Predicted tracks' + '\n' + convert_dict_to_str(result, split_each_track)
-                    split_each_track, split_each_track_valid_mask = update_split_each_track_valid_mask(result)
-                elif pairs_correction_two_halves[trajectory_first_half_key][0] is None and \
-                        pairs_correction_two_halves[trajectory_second_half_key][1] is not None and \
-                        [str(int(max([int(x) for x in mapping_node_id_to_bbox.keys()])) * 4), pairs_correction_two_halves[trajectory_second_half_key][1][0][0]] in pairs_decision:
-                    split_each_track[trajectory_first_half_key] = pairs_correction_two_halves[trajectory_second_half_key][1]
-                    need_to_fix_cnt += 1
-                    return_to_while = True
-                    result[0] = 'Predicted tracks' + '\n' + convert_dict_to_str(result, split_each_track)
-                    split_each_track, split_each_track_valid_mask = update_split_each_track_valid_mask(result)
-    return split_each_track, split_each_track_valid_mask, need_to_fix_cnt, return_to_while, result
 
 ###########################################################################################################################################################
 # input: a list of lists in a trajectory, example: [[A, B], [C, D], [E, F], ..., [X, Y]]
@@ -2061,176 +1583,6 @@ def interpolate_to_obtain_traj(input_list):
 # mapping_node_id_to_bbox - a dict, each key is an integer, the value for each key is a list with three elements: bounding box coordinates in float, confidence in float and a string indicating frame id, an example is shown in supplementary_materials_for_MOT_postprocessing
 # mapping_node_id_to_features - a dict, each key is an integer, the value for each key is a 512-dim numpy array with floating numbers
 
-# output:
-# result - a list with two elements, the first element is a string, an example of the string is
-# # 'Predicted tracks
-# # 3~~61~56~55~50~49~44~43~40~39~36~35~30~29~24~23~18~17~10~9~2~1~0~~61~58~57~52~51~46~45~38~37~32~31~26~25~22~21~14~13~8~7~4~3~0~~61~60~59~54~53~48~47~42~41~34~33~28~27~20~19~16~15~12~11~6~5~0'
-def revise_result(result, mapping_edge_id_to_cost, mapping_node_id_to_bbox, mapping_node_id_to_features):
-    # The reason for using while is we traverse all nodes of all trajectories to determine if a node also appears in another trajectory
-    # When we have processed on duplicate node, we set return_to_while to True, inner loops are broken when seeing return_to_while == True
-    # need_to_fix_cnt += accompanies return_to_while = True, if a while loop finds need_to_fix_cnt == 0, then no duplicate nodes appear, so the while is broken and this function returns
-
-    # convert string 'result' which encodes all trajectories in a string to split_each_track which encodes all trajectories in a dict
-    # split_each_track is a dict, each key is an index of a trajectory, the value is a list of nodes in one trajectory, each node is a list with two integers
-    # split_each_track_valid_mask is a dict, the keys are the same as split_each_track_valid, the value under each key is a bool number indicating the validity of the node
-    split_each_track, split_each_track_valid_mask = update_split_each_track_valid_mask(result)
-    # assert the first nodes in all trajectories are valid
-    # assert(0 not in [(int(split_each_track[x][0][0]) < int(split_each_track[x][0][1])) for x in split_each_track])
-    # for split_each_track_key in split_each_track:
-    #     if split_each_track[split_each_track_key][0][0] > split_each_track[split_each_track_key][0][1]:
-
-    # Step 1: locate the first halves of all trajectories
-    for split_each_track_key in split_each_track:
-        for element_idx in range(0, len(split_each_track[split_each_track_key]), 2):
-            if int(split_each_track[split_each_track_key][element_idx][0]) > int(split_each_track[split_each_track_key][element_idx][1]):
-                for split_each_track_another_key in [x for x in split_each_track if x != split_each_track_key]:
-                    if [split_each_track[split_each_track_key][element_idx][1], split_each_track[split_each_track_key][element_idx][0]] in split_each_track[split_each_track_another_key]:
-                        split_each_track_valid_mask[split_each_track_another_key][split_each_track[split_each_track_another_key].index([split_each_track[split_each_track_key][element_idx][1], split_each_track[split_each_track_key][element_idx][0]])] = -1
-                        if split_each_track[split_each_track_another_key].index([split_each_track[split_each_track_key][element_idx][1], split_each_track[split_each_track_key][element_idx][0]]) - 1 >= 0:
-                            split_each_track_valid_mask[split_each_track_another_key][split_each_track[split_each_track_another_key].index([split_each_track[split_each_track_key][element_idx][1], split_each_track[split_each_track_key][element_idx][0]]) - 1] = 0
-                        if split_each_track[split_each_track_another_key].index([split_each_track[split_each_track_key][element_idx][1], split_each_track[split_each_track_key][element_idx][0]]) - 2 >= 0: # < len(split_each_track_valid_mask[split_each_track_another_key]):
-                            split_each_track_valid_mask[split_each_track_another_key][split_each_track[split_each_track_another_key].index([split_each_track[split_each_track_key][element_idx][1], split_each_track[split_each_track_key][element_idx][0]]) - 2] = 0
-
-    # Allen: you must remove
-    for split_each_track_valid_mask_key in split_each_track_valid_mask:
-        for element_idx in range(1, len(split_each_track_valid_mask[split_each_track_valid_mask_key]) - 1):
-            if split_each_track_valid_mask[split_each_track_valid_mask_key][element_idx] == -1 and len(split_each_track_valid_mask[split_each_track_valid_mask_key]) > element_idx + 1:
-                split_each_track_valid_mask[split_each_track_valid_mask_key][element_idx + 1] = 0
-            if split_each_track_valid_mask[split_each_track_valid_mask_key][element_idx] == -1 and element_idx - 1 >= 0:
-                split_each_track_valid_mask[split_each_track_valid_mask_key][element_idx - 1] = 0
-        if int(split_each_track[split_each_track_valid_mask_key][0][0]) % 2 == 0 and int(split_each_track[split_each_track_valid_mask_key][0][1]) % 2 == 1:
-            split_each_track_valid_mask[split_each_track_valid_mask_key][0] = 0
-
-    split_each_track_valid_first_halves = {}
-    for split_each_track_key in split_each_track:
-        split_each_track_valid_first_halves[split_each_track_key] = []
-        start_valid_element_idx = [x for x in range(len(split_each_track_valid_mask[split_each_track_key])) if split_each_track_valid_mask[split_each_track_key][x] > 0][0]
-        for element_idx in range(start_valid_element_idx, len(split_each_track_valid_mask[split_each_track_key])):
-            if split_each_track_valid_mask[split_each_track_key][element_idx] > 0:
-                split_each_track_valid_first_halves[split_each_track_key].append(split_each_track[split_each_track_key][element_idx])
-            else:
-                break
-
-    independent_nodes_collection = []
-    for split_each_track_key in split_each_track:
-        for element_node in split_each_track[split_each_track_key]:
-            if (element_node not in split_each_track_valid_first_halves[split_each_track_key]) and \
-                    (int(element_node[0]) % 2 == 1) and (int(element_node[1]) % 2 == 0) and (int(element_node[0]) < int(element_node[1])):
-                independent_nodes_collection.append(element_node)
-    independent_nodes_collection = sorted(independent_nodes_collection)
-    # the nodes in mapping_node_id_to_bbox but not in split_each_track should also be considered
-    split_each_track_node_collection = []
-    for split_each_track_key in split_each_track:
-        split_each_track_node_collection += [x for x in split_each_track[split_each_track_key] if (int(x[0]) % 2 == 1 and int(x[1]) % 2 == 0)]
-    for mapping_node_id_to_bbox_key in mapping_node_id_to_bbox:
-        if [str(mapping_node_id_to_bbox_key * 2 - 1), str(mapping_node_id_to_bbox_key * 2)] not in split_each_track_node_collection:
-            independent_nodes_collection.append([str(mapping_node_id_to_bbox_key * 2 - 1), str(mapping_node_id_to_bbox_key * 2)])
-
-    for independent_node in independent_nodes_collection:
-        curr_node_matching_scores_with_all_split_each_track_valid_first_halves = []
-        curr_node_insert_locations_in_all_split_each_track_valid_first_halves = []
-        for split_each_track_key in split_each_track_valid_first_halves:
-            if len([x for x in range(len(split_each_track_valid_first_halves[split_each_track_key])) if (int(split_each_track_valid_first_halves[split_each_track_key][x][0]) < int(independent_node[0]) and int(split_each_track_valid_first_halves[split_each_track_key][x][1]) > int(independent_node[1]))]) > 0:
-                curr_traj_insert_location = [x for x in range(len(split_each_track_valid_first_halves[split_each_track_key])) if (int(split_each_track_valid_first_halves[split_each_track_key][x][0]) < int(independent_node[0]) and int(split_each_track_valid_first_halves[split_each_track_key][x][1]) > int(independent_node[1]))][0]
-                port_in_ori_traj = split_each_track_valid_first_halves[split_each_track_key][curr_traj_insert_location][0]
-                port_in_curr_node = independent_node[0]
-                if len([mapping_node_id_to_features[x] for x in mapping_node_id_to_features if (int(x) <= int(int(port_in_ori_traj) / 2) and [str(int(x) * 2 - 1), str(int(x) * 2)] in split_each_track_valid_first_halves[split_each_track_key] and mapping_node_id_to_bbox[x][1] <= 1.0)]) == 0:
-                    former_reid_feature = np.mean([mapping_node_id_to_features[x] for x in mapping_node_id_to_features if (int(x) <= int(int(port_in_ori_traj) / 2) and [str(int(x) * 2 - 1), str(int(x) * 2)] in split_each_track_valid_first_halves[split_each_track_key])], axis=0)
-                else:
-                    former_reid_feature = np.mean([mapping_node_id_to_features[x] for x in mapping_node_id_to_features if (int(x) <= int(int(port_in_ori_traj) / 2) and [str(int(x) * 2 - 1), str(int(x) * 2)] in split_each_track_valid_first_halves[split_each_track_key] and mapping_node_id_to_bbox[x][1] <= 1.0)], axis=0)  # np.array(mapping_node_id_to_features[int(int(port_in_ori_traj) / 2)])
-                latter_reid_feature = np.array(mapping_node_id_to_features[int(int(independent_node[1]) / 2)])
-                num = float(np.dot(former_reid_feature, latter_reid_feature.T))
-                denom = np.linalg.norm(former_reid_feature) * np.linalg.norm(latter_reid_feature)
-                cos = num / denom
-                depth_similarity = 1.0 / max([0.5, abs(mapping_node_id_to_bbox[int(int(port_in_ori_traj) / 2)][0][1][1] - mapping_node_id_to_bbox[int(int(independent_node[1]) / 2)][0][1][1])])
-                if mapping_node_id_to_bbox[int(int(independent_node[1]) / 2)][2] in [mapping_node_id_to_bbox[x][2] for x in mapping_node_id_to_features if (int(x) >= int(int(port_in_ori_traj) / 2) and [str(int(x) * 2 - 1), str(int(x) * 2)] in split_each_track_valid_first_halves[split_each_track_key])]:
-                    curr_node_matching_scores_with_all_split_each_track_valid_first_halves.append(0)
-                else:
-                    curr_node_matching_scores_with_all_split_each_track_valid_first_halves.append((0.5 + 0.5 * cos)) # * depth_similarity)
-            elif int(split_each_track_valid_first_halves[split_each_track_key][-1][1]) < int(independent_node[0]):
-                curr_traj_insert_location = len(split_each_track_valid_first_halves[split_each_track_key])
-                port_in_ori_traj = split_each_track_valid_first_halves[split_each_track_key][-1][1]
-                port_in_curr_node = independent_node[0]
-                if len([mapping_node_id_to_features[x] for x in mapping_node_id_to_features if (int(x) <= int(int(port_in_ori_traj) / 2) and [str(int(x) * 2 - 1), str(int(x) * 2)] in split_each_track_valid_first_halves[split_each_track_key] and mapping_node_id_to_bbox[x][1] <= 1.0)]) == 0:
-                    former_reid_feature = np.mean([mapping_node_id_to_features[x] for x in mapping_node_id_to_features if (int(x) <= int(int(port_in_ori_traj) / 2) and [str(int(x) * 2 - 1), str(int(x) * 2)] in split_each_track_valid_first_halves[split_each_track_key])], axis=0)
-                else:
-                    former_reid_feature = np.mean([mapping_node_id_to_features[x] for x in mapping_node_id_to_features if (int(x) <= int(int(port_in_ori_traj) / 2) and [str(int(x) * 2 - 1), str(int(x) * 2)] in split_each_track_valid_first_halves[split_each_track_key] and mapping_node_id_to_bbox[x][1] <= 1.0)], axis=0)  # np.array(mapping_node_id_to_features[int(int(port_in_ori_traj) / 2)])
-                latter_reid_feature = np.array(mapping_node_id_to_features[int(int(independent_node[1]) / 2)])
-                num = float(np.dot(former_reid_feature, latter_reid_feature.T))
-                denom = np.linalg.norm(former_reid_feature) * np.linalg.norm(latter_reid_feature)
-                cos = num / denom
-                depth_similarity = 1.0 / max([0.5, abs(mapping_node_id_to_bbox[int(int(port_in_ori_traj) / 2)][0][1][1] - mapping_node_id_to_bbox[int(int(independent_node[1]) / 2)][0][1][1])])
-                if mapping_node_id_to_bbox[int(int(port_in_ori_traj) / 2)][2] == mapping_node_id_to_bbox[int(int(independent_node[1]) / 2)][2]:
-                    curr_node_matching_scores_with_all_split_each_track_valid_first_halves.append(0)
-                else:
-                    curr_node_matching_scores_with_all_split_each_track_valid_first_halves.append((0.5 + 0.5 * cos)) # * depth_similarity)
-            elif int(split_each_track_valid_first_halves[split_each_track_key][0][0]) > int(independent_node[1]):
-                curr_traj_insert_location = 0
-                port_in_ori_traj = split_each_track_valid_first_halves[split_each_track_key][0][1]
-                port_in_curr_node = independent_node[1]
-                if len([mapping_node_id_to_features[x] for x in mapping_node_id_to_features if (int(x) >= int(int(port_in_ori_traj) / 2) and [str(int(x) * 2 - 1), str(int(x) * 2)] in split_each_track_valid_first_halves[split_each_track_key] and mapping_node_id_to_bbox[x][1] <= 1.0)]) == 0:
-                    former_reid_feature = np.mean([mapping_node_id_to_features[x] for x in mapping_node_id_to_features if (int(x) >= int(int(port_in_ori_traj) / 2) and [str(int(x) * 2 - 1), str(int(x) * 2)] in split_each_track_valid_first_halves[split_each_track_key])], axis=0)
-                else:
-                    former_reid_feature = np.mean([mapping_node_id_to_features[x] for x in mapping_node_id_to_features if (int(x) >= int(int(port_in_ori_traj) / 2) and [str(int(x) * 2 - 1), str(int(x) * 2)] in split_each_track_valid_first_halves[split_each_track_key] and mapping_node_id_to_bbox[x][1] <= 1.0)], axis=0)  # np.array(mapping_node_id_to_features[int(int(port_in_ori_traj) / 2)])
-                latter_reid_feature = np.array(mapping_node_id_to_features[int(int(independent_node[1]) / 2)])
-                num = float(np.dot(former_reid_feature, latter_reid_feature.T))
-                denom = np.linalg.norm(former_reid_feature) * np.linalg.norm(latter_reid_feature)
-                cos = num / denom
-                depth_similarity = 1.0 / max([0.5, abs(mapping_node_id_to_bbox[int(int(port_in_ori_traj) / 2)][0][1][1] - mapping_node_id_to_bbox[int(int(independent_node[1]) / 2)][0][1][1])])
-                if mapping_node_id_to_bbox[int(int(port_in_ori_traj) / 2)][2] == mapping_node_id_to_bbox[int(int(independent_node[1]) / 2)][2]:
-                    curr_node_matching_scores_with_all_split_each_track_valid_first_halves.append(0)
-                else:
-                    curr_node_matching_scores_with_all_split_each_track_valid_first_halves.append((0.5 + 0.5 * cos))  # * depth_similarity)
-            else:
-                curr_traj_insert_location = -1
-                curr_node_matching_scores_with_all_split_each_track_valid_first_halves.append(0)
-            curr_node_insert_locations_in_all_split_each_track_valid_first_halves.append(curr_traj_insert_location)
-        if np.max(curr_node_matching_scores_with_all_split_each_track_valid_first_halves) == 0:
-            continue
-        else:
-            idx_of_trajectory_to_insert = np.argmax(curr_node_matching_scores_with_all_split_each_track_valid_first_halves)
-            key_of_trajectory_to_insert = [x for x in split_each_track][np.argmax(curr_node_matching_scores_with_all_split_each_track_valid_first_halves)]
-            location_to_insert = curr_node_insert_locations_in_all_split_each_track_valid_first_halves[idx_of_trajectory_to_insert]
-            if location_to_insert == -1:
-                continue
-            elif location_to_insert == len(split_each_track_valid_first_halves[key_of_trajectory_to_insert]):
-                split_each_track_valid_first_halves[key_of_trajectory_to_insert] = split_each_track_valid_first_halves[key_of_trajectory_to_insert] + \
-                                                                                   [[split_each_track_valid_first_halves[key_of_trajectory_to_insert][-1][1], independent_node[0]]] + \
-                                                                                   [independent_node]
-            elif location_to_insert == 0:
-                split_each_track_valid_first_halves[key_of_trajectory_to_insert] = [independent_node] + \
-                                                                                   [[independent_node[1], split_each_track_valid_first_halves[key_of_trajectory_to_insert][0][0]]] + \
-                                                                                   split_each_track_valid_first_halves[key_of_trajectory_to_insert]
-            else:
-                split_each_track_valid_first_halves[key_of_trajectory_to_insert] = split_each_track_valid_first_halves[key_of_trajectory_to_insert][:location_to_insert] + \
-                                                                                   [[split_each_track_valid_first_halves[key_of_trajectory_to_insert][location_to_insert][0], independent_node[0]]] + \
-                                                                                   [independent_node] + \
-                                                                                   [[independent_node[1], split_each_track_valid_first_halves[key_of_trajectory_to_insert][location_to_insert][1]]] + \
-                                                                                   split_each_track_valid_first_halves[key_of_trajectory_to_insert][location_to_insert + 1:]
-
-        split_each_track = copy.deepcopy(split_each_track_valid_first_halves)
-        result[0] = 'Predicted tracks' + '\n' + convert_dict_to_str(result, split_each_track)
-        split_each_track, split_each_track_valid_mask = update_split_each_track_valid_mask(result)
-    return result
-
-def revise_format_for_bbox(curr_tracklet_json, mapping_node_id_to_bbox):
-    result_list = [None]*tracklet_len
-    distinct_frame_names = []
-    for curr_tracklet_json_key in curr_tracklet_json.keys():
-        distinct_frame_names += [x for x in curr_tracklet_json[curr_tracklet_json_key]]
-    distinct_frame_names = list(set(distinct_frame_names))
-    distinct_frame_names.sort()
-    complete_frame_names = list(set([mapping_node_id_to_bbox[x][2] for x in mapping_node_id_to_bbox.keys()]))
-    complete_frame_names.sort()
-    for complete_frame_name in complete_frame_names:
-        result_list[complete_frame_names.index(complete_frame_name)] = {'bbox_list': {}}
-    for distinct_frame_name in distinct_frame_names:
-        curr_frame_dict = {}
-        for curr_tracklet_json_key in curr_tracklet_json.keys():
-            if distinct_frame_name in curr_tracklet_json[curr_tracklet_json_key]:
-                curr_frame_dict[str(curr_tracklet_json_key)] = curr_tracklet_json[curr_tracklet_json_key][distinct_frame_name]
-        result_list[complete_frame_names.index(distinct_frame_name)] = {'bbox_list': curr_frame_dict}
-    return result_list
 
 ######################################################################################################################################################
 ################################################ part for anomaly detection ##########################################################################
@@ -2666,129 +2018,6 @@ def convert_track_to_stitch_format(split_each_track,mapping_node_id_to_bbox,mapp
         mapping_frameid_to_object_features.clear()
     return curr_predicted_tracks,curr_predicted_tracks_confidence_score,curr_predicted_tracks_bboxes,curr_representative_frames,curr_predicted_tracks_bboxes_test,trajectory_similarity_dict,curr_video_segment_all_traj_all_object_features
 
-def mapping_tracklet_data_preparation(gmc,files,tracklet_pose_collection,similarity_module,tracklet_inner_cnt,whether_use_reid_similarity_or_not):
-    curr_tracklet_input_people, mapping_frameid_bbox_to_features, curr_tracklet_input_people_center_coords = convert_list_dict_to_np(tracklet_pose_collection, 256, 128)# 近10帧
-    gc.collect()
-    torch.cuda.empty_cache()
-    # print(torch.cuda.memory_summary(device=0, abbreviated=False))
-    with torch.no_grad():
-        features = similarity_module(torch.from_numpy(curr_tracklet_input_people.astype('float32')).cuda()).data.cpu()
-    # 计算所有input people的特征向量
-    # Tensor(79,512)
-    reid_end_time = time.time()
-    # mapping_frameid_bbox_to_features 的值替换为bbox的特征
-    for mapping_frameid_bbox_to_features_key in mapping_frameid_bbox_to_features.keys():
-        mapping_frameid_bbox_to_features[mapping_frameid_bbox_to_features_key] = features[mapping_frameid_bbox_to_features[mapping_frameid_bbox_to_features_key], :].tolist()
-
-    ############################################################################################################################################
-    mapping_node_id_to_bbox = {} # dict:79 包含每个node的bbox位置置信度以及帧名
-    mapping_node_id_to_features = {} #　dict: key=str(imgname,bbox) value=feature
-    mapping_edge_id_to_cost = {} #　每个id与下一帧每个id的损失　
-    mapping_node_id_to_keypoint = {}
-    node_id_cnt = 1 #
-    ###################################################################### multiprocessing for computing matching error between people
-    # error_computing_start_time = time.time()
-    # number of frame-to-frame pairs for matching
-    num_of_person_to_person_matching_matrix_normalized_copies = 0
-    # for multi-process, the matching between each pair of frames produces a matrix with number of rows equal to the number of people in the former frame and
-    # number of cols equal to the number of people in the latter frame, this variable stores the maximum number of rows throughout all frame pairs
-    max_row_num_of_person_to_person_matching_matrix_normalized = 0 #所有当前帧中最大值
-    # for multi-process, the matching between each pair of frames produces a matrix with number of rows equal to the number of people in the former frame and
-    # number of cols equal to the number of people in the latter frame, this variable stores the maximum number of cols throughout all frame pairs
-    max_col_num_of_person_to_person_matching_matrix_normalized = 0 #所有下一帧中最大值
-    tracklet_inner_idx_list = []
-    node_id_cnt_list = []
-    parallel_tasks_args_list = []
-    for tracklet_inner_idx in range(len(tracklet_pose_collection)):
-        curr_frame_dict = tracklet_pose_collection[tracklet_inner_idx]  # 当前处理帧
-        if len(curr_frame_dict['bbox_list']) == 0:
-            continue
-        for idx_stride_between_frame_pair in range(1, 3): # 配对帧之间步长最多为2
-            if tracklet_inner_idx + idx_stride_between_frame_pair >= len(tracklet_pose_collection): # 保证仍然在该batch内
-                continue
-    # current node idx (each node represents one person in a certain frame), collection of all human bounding boxes in current batch, stride between former and latter frames, an extremely large number
-            next_frame_dict = tracklet_pose_collection[tracklet_inner_idx + idx_stride_between_frame_pair]
-            if len(next_frame_dict['bbox_list']) == 0:
-                continue
-            parallel_tasks_args_list.append([tracklet_inner_idx, tracklet_inner_cnt - tracklet_len + 1, node_id_cnt, tracklet_pose_collection, idx_stride_between_frame_pair, maximum_possible_number]) # 当前batch起始帧位置
-            num_of_person_to_person_matching_matrix_normalized_copies += 1
-            max_row_num_of_person_to_person_matching_matrix_normalized = max([max_row_num_of_person_to_person_matching_matrix_normalized, len(curr_frame_dict['bbox_list'])])
-            max_col_num_of_person_to_person_matching_matrix_normalized = max([max_col_num_of_person_to_person_matching_matrix_normalized, len(next_frame_dict['bbox_list'])])
-        node_id_cnt += len(curr_frame_dict['bbox_list'])
-    # The matching matrix storing the matching relations between all pairs of frames
-    person_to_person_matching_matrix_normalized_collection = np.zeros((max_row_num_of_person_to_person_matching_matrix_normalized, max_col_num_of_person_to_person_matching_matrix_normalized, num_of_person_to_person_matching_matrix_normalized_copies))
-    result_person_to_person_matching_matrix_normalized_collection = copy.deepcopy(person_to_person_matching_matrix_normalized_collection)
-    # person_to_person_matching_matrix_normalized_collection = multiprocessing.RawArray('d', person_to_person_matching_matrix_normalized_collection.ravel())
-    for parallel_tasks_args_list_item in parallel_tasks_args_list:
-        tracklet_inner_idx_list.append(parallel_tasks_args_list_item[0])
-        node_id_cnt_list.append(parallel_tasks_args_list_item[2])
-        parallel_tasks_args_list[parallel_tasks_args_list.index(parallel_tasks_args_list_item)] = parallel_tasks_args_list_item + [max_row_num_of_person_to_person_matching_matrix_normalized, max_col_num_of_person_to_person_matching_matrix_normalized, num_of_person_to_person_matching_matrix_normalized_copies, node_id_cnt_list, features]
-    # with multiprocessing.Pool(processes=8) as pool:
-    whether_use_iou_similarity_or_not = True # (GetFaceSmdScore(im0s) > 0.7) # 如果清晰度大于阈值则使用iou_similarity
-
-    for parallel_tasks_args_list_item in parallel_tasks_args_list:
-        person_to_person_matching_matrix_normalized, idx_stride_between_frame_pair, node_id_cnt = compute_inter_person_similarity_worker(files,parallel_tasks_args_list_item, whether_use_iou_similarity_or_not,whether_use_reid_similarity_or_not)
-        # collect the results from multiprocessing and store the matching error between each pair of frames into result_person_to_person_matching_matrix_normalized_collection
-        result_person_to_person_matching_matrix_normalized_collection[0:person_to_person_matching_matrix_normalized.shape[0], \
-                                                                      0:person_to_person_matching_matrix_normalized.shape[1], \
-                                                                      [parallel_tasks_args_list.index(x) for x in parallel_tasks_args_list if (x[2]==node_id_cnt and x[4]==idx_stride_between_frame_pair)][0]] = person_to_person_matching_matrix_normalized
-
-    node_id_cnt = 1
-    for tracklet_inner_idx in range(len(tracklet_pose_collection)):
-        # tracklet_pose_collection is a dict, each key is an integer of frame id, the value corresponding to the key is a dict with following keys:
-        # 'bbox_list': a list of bboxes in the frame, each bbox with floating data [(left coordinate, top coordinate), (right coordinate, bottom coordinate)], body bboxes
-        # 'head_bbox_list': a list of bboxes in the frame, each bbox with floating data [(left coordinate, top coordinate), (right coordinate, bottom coordinate)], head bboxes
-        # 'box_confidence_scores': a list of confidences of bboxes, each element is a floating number within range [0, 1]
-        # 'target_body_box_coord': a list with two elements, in the format of floating [(left coordinate, top coordinate), (right coordinate, bottom coordinate)], describe the bbox of the target person
-        # 'img_dir': a string describing the location for storing the frame, ending with '.jpg'
-        curr_frame_dict = tracklet_pose_collection[tracklet_inner_idx]
-        if len(curr_frame_dict['bbox_list']) == 0:
-            continue
-        # matching is conducted between (frame t, frame t+1) and (frame t, frame t+2), that is (frame t, frame t+idx_stride_between_frame_pair) with idx_stride_between_frame_pair=1, 2
-        for idx_stride_between_frame_pair in range(1, 3):
-            # if frame t and frame t+idx_stride_between_frame_pair all have detections
-            if tracklet_inner_idx + idx_stride_between_frame_pair < len(tracklet_pose_collection):
-                next_frame_dict = tracklet_pose_collection[tracklet_inner_idx + idx_stride_between_frame_pair]
-                if len(next_frame_dict['bbox_list']) == 0:
-                    continue
-                ############################################################# matching ######################################################
-                # introduction
-                # Now begin to obtain a matrix describing the matching error between people in two frames, each row corresponds to one person in current frame, each column corresponds to one person in next frame
-                # each element of parallel_tasks_args_list corresponds to one frame pair, one element consists of: frame idx of the former frame, starting frame idx of current batch of frames,
-                # starting node idx in former frame in a frame pair (each node represents one person in a certain frame), collection of all human bounding boxes in current batch, stride between former and latter frames, an extremely large number,
-                # maximum number of people in former frames from all frame pairs, maximum number of people in latter frames from all frame pairs, number of frame pairs for matching in current batch of frames,
-                # an integer list of starting node ids in former frame from all frame pairs, a floating array with shape num_people_in_current_batch_of_frames x 512 describing the reid features of all humans in current batch of frames
-                # input
-                # 0:len(curr_frame_dict['bbox_list']) - from 0 to the number of people in the former frame in frame pair
-                # 0:len(next_frame_dict['bbox_list']) - from 0 to the number of people in the latter frame in frame pair
-                # [parallel_tasks_args_list.index(x) for x in parallel_tasks_args_list if (x[2]==node_id_cnt and x[4]==idx_stride_between_frame_pair)][0] - the channel idx of the matrix describing matching relations between current frame pair in result_person_to_person_matching_matrix_normalized_collection
-                # output
-                # a floating matrix person_to_person_matching_matrix_normalized describing the matching relations between current batch of frames
-                person_to_person_matching_matrix_normalized = result_person_to_person_matching_matrix_normalized_collection[0:len(curr_frame_dict['bbox_list']), 0:len(next_frame_dict['bbox_list']), [parallel_tasks_args_list.index(x) for x in parallel_tasks_args_list if (x[2]==node_id_cnt and x[4]==idx_stride_between_frame_pair)][0]]
-                ########################################################## begin to prepare data for tracker ###################################################################
-                time_start_prepare_costs = time.time()
-                # mapping_frameid_bbox_to_features: a dict mapping string 'frameid_bbox coordinates' to a 512-D feature vector, the string 'frameid_bbox coordinates' has length 36, an example is '0930[(467.0, 313.0), (508.0, 424.0)]' where 0930 is frame id, the coordinates are in the format [(left, top), (right, bottom)]
-                mapping_node_id_to_bbox, mapping_node_id_to_features, mapping_edge_id_to_cost = prepare_costs_for_tracking_alg(idx_stride_between_frame_pair, curr_frame_dict, tracklet_pose_collection, next_frame_dict, person_to_person_matching_matrix_normalized, node_id_cnt, tracklet_inner_idx, mapping_node_id_to_bbox, mapping_node_id_to_features, mapping_edge_id_to_cost, mapping_frameid_bbox_to_features)
-                time_end_prepare_costs = time.time()
-        node_id_cnt += len(curr_frame_dict['bbox_list'])
-    # time_end = time.time()
-    # error_computing_end_time = time.time()
-    #print('error computing time: ' + str(error_computing_end_time - error_computing_start_time))
-    max_in_mapping_edge_id_to_cost = max([mapping_edge_id_to_cost[x] for x in mapping_edge_id_to_cost]) + 1e-6
-    if max_in_mapping_edge_id_to_cost >= 0:
-        for mapping_edge_id_to_cost_key in mapping_edge_id_to_cost:
-            mapping_edge_id_to_cost[mapping_edge_id_to_cost_key] = mapping_edge_id_to_cost[mapping_edge_id_to_cost_key] - max_in_mapping_edge_id_to_cost
-    if dump_further_switch == 1:
-        if not os.path.exists(os.path.join(dump_curr_video_name)):
-            os.mkdir(os.path.join(dump_curr_video_name))
-        out_file = os.path.join(dump_curr_video_name, 'input_to_track_mapping_node_id_to_bbox_frame' + str(tracklet_inner_cnt + 1 - tracklet_len) + 'to' + str(tracklet_inner_cnt) + '.json')
-        json.dump(mapping_node_id_to_bbox, codecs.open(out_file, 'w', encoding='utf-8'), separators=(',', ':'), sort_keys=True)
-        out_file = os.path.join(dump_curr_video_name, 'input_to_track_mapping_node_id_to_features_frame' + str(tracklet_inner_cnt + 1 - tracklet_len) + 'to' + str(tracklet_inner_cnt) + '.json')
-        json.dump(mapping_node_id_to_features, codecs.open(out_file, 'w', encoding='utf-8'), separators=(',', ':'), sort_keys=True)
-        out_file = os.path.join(dump_curr_video_name, 'input_to_track_mapping_edge_id_to_cost_frame' + str(tracklet_inner_cnt + 1 - tracklet_len) + 'to' + str(tracklet_inner_cnt) + '.json')
-        json.dump(mapping_edge_id_to_cost, codecs.open(out_file, 'w', encoding='utf-8'), separators=(',', ':'), sort_keys=True)
-    return mapping_node_id_to_bbox,mapping_edge_id_to_cost,mapping_node_id_to_features
-
 def mapping_data_preparation(files,encoder,tracklet_pose_collection,tracklet_inner_cnt,whether_use_reid_similarity_or_not):
     '''
     Use fastreid to extract reid feature
@@ -3145,111 +2374,7 @@ def tracks_combination(tracklet_inner_cnt,remained_tracks,result,result_second,m
     if config["debug"]:
         show_fix_clusters(cluster_tracks,mapping_node_id_to_bbox_second)
     return results_return(definite_track_list,cluster_tracks)
-    ### 对于K-means当中的tracklets进行合并 ###
-    '''
-    1、合并的时候以较小的track_id为准
-    2、前向后向回归
-    [1,2] [4,5,6]则前面的回归到第4帧，后面的向前回归到第2帧，然后计算回归帧以及已有帧的平均iou相似度
-    '''
-    def tracklet_regression(track1,frame_start,frame_end,frame_span1,mapping_node_id_to_bbox):
-        '''
-        track1:key node
-        '''
-        frame_bbox1 = {int(mapping_node_id_to_bbox[node][2].split('.')[0]): mapping_node_id_to_bbox[node][0] for node in
-                       track1}  # key:frame(int) value:bbox
-        width1 = np.mean([frame_bbox1[frame][1][0] - frame_bbox1[frame][0][0] for frame in frame_bbox1])
-        height1 = np.mean([frame_bbox1[frame][1][1] - frame_bbox1[frame][0][1] for frame in frame_bbox1])
-        horicenter_coordinates1 = (np.array(
-            [frame_bbox1[frame][1][0] + frame_bbox1[frame][0][0] for frame in frame_bbox1]) / 2.0).tolist()  # 水平
-        vertcenter_coordinates1 = (np.array(
-            [frame_bbox1[frame][1][1] + frame_bbox1[frame][0][1] for frame in frame_bbox1]) / 2.0).tolist()  # 垂直
-        horicenter_fitter_coefficients = np.polyfit(frame_span1, horicenter_coordinates1, 1)
-        vertcenter_fitter_coefficients = np.polyfit(frame_span1, vertcenter_coordinates1, 1)
-        horicenter_fitter = np.poly1d(horicenter_fitter_coefficients)  # np.poly1d根据数组生成一个多项式
-        vertcenter_fitter = np.poly1d(vertcenter_fitter_coefficients)
-        if len(frame_span1) == (frame_end - frame_start + 1): # 此时不需要进行回归
-            frame_bbox1 = dict(sorted(frame_bbox1.items(), key=operator.itemgetter(0)))
-            return frame_bbox1,horicenter_fitter_coefficients,vertcenter_fitter_coefficients
-        for frame in range(frame_start, frame_end + 1):
-            if frame in frame_bbox1:  # 已经存在
-                continue
-            else:  #
-                frame_bbox1[frame] = [
-                    (horicenter_fitter(float(frame)) - width1 / 2.0, vertcenter_fitter(float(frame)) - height1 / 2.0),
-                    (horicenter_fitter(float(frame)) + width1 / 2.0, vertcenter_fitter(float(frame)) + height1 / 2.0)]
-        # frame_bbox1 = dict(sorted(frame_bbox1.items(),key=lambda d:d[0]))
-        # frame_bbox1 = sorted(frame_bbox1)
-        frame_bbox1 = dict(sorted(frame_bbox1.items(), key=operator.itemgetter(0)))  # 按照key值升序,从而使得计算iou的时候帧数是对应的
-        return frame_bbox1,horicenter_fitter_coefficients,vertcenter_fitter_coefficients
-    ############ 处理clusters当中需要合并以及重复的track ############
-    print('### processing cluster results ###')
-    remove_list = []
-    combine_list = {} # 记录需要进行合并的轨迹以及相似度
-    for id1 in cluster_tracks:
-        for id2 in cluster_tracks:
-            if id1 >= id2 or len(cluster_tracks[id1]) <2 or len(cluster_tracks[id2])<2:
-                continue
-            track1 = cluster_tracks[id1]
-            frame_span1 = np.unique([int(mapping_node_id_to_bbox_second[node][2].split('.')[0]) for node in track1]).tolist() # 自变量
-            frame_bbox1,hfitter1,vfitter1 = tracklet_regression(track1,frame_start,frame_end,frame_span1,mapping_node_id_to_bbox_second)
-            track2 = cluster_tracks[id2]
-            frame_span2 = np.unique([int(mapping_node_id_to_bbox_second[node][2].split('.')[0]) for node in track2]).tolist()
-            frame_bbox2,hfitter2,vfitter2 = tracklet_regression(track2, frame_start, frame_end,frame_span2,mapping_node_id_to_bbox_second)
-            tmp_span = np.unique(frame_span1 + frame_span2).tolist()
-            ### regression ##
-            ### 从最小的frame到最大的frame计算相似度 ###
-            tracklet1 = np.array([frame_bbox1[frame] for frame in frame_bbox1])
-            tracklet2 = np.array([frame_bbox2[frame] for frame in frame_bbox2])
-            tracklet_ious_matrix  = compute_iou_between_bbox_list(tracklet1.reshape(-1, 2, 2), tracklet2.reshape(-1, 2, 2))
-            # tracklet_overlap_matrix = compute_overlap_between_bbox_list(tracklet1.reshape(-1, 2, 2), tracklet2.reshape(-1, 2, 2))
-            ### 判断是否有相同帧 ###
-            if len(set(frame_span1+frame_span2)) >= len(frame_span1) + len(frame_span2) - 2: # the overlap is less than 2 frames
-                # 是否可以合并
-                # 如果包含拟合结果
-                # mask_h = abs(hfitter1[0]) > 1. and abs(hfitter2[0])>1.
-                # mask_v = abs(vfitter1[0]) > 1. and abs(vfitter2[0])>1.
-                vec1 = np.array([hfitter1[0],vfitter1[0]])
-                vec2 = np.array([hfitter2[0],vfitter2[0]])
-                direction = cosine_similarity(vec1,vec2)
-                if direction < 0. and np.linalg.norm(vec2) > 4 and np.linalg.norm(vec1) > 4:
-                    continue
-                # if abs(hfitter1[0]-hfitter2[0]) > 5. and abs(vfitter1[0] - vfitter2[0]) > 3.:
-                #     continue
-                # elif abs(vfitter1[0] - vfitter2[0]) > 5. and abs(hfitter1[0]-hfitter2[0]) > 3.:
-                #     continue
-                # # if (np.sign(hfitter1[0]) != np.sign(hfitter2[0]) and mask_h) or (np.sign(vfitter1[0]) != np.sign(vfitter2[0]) and mask_v):
-                #     continue # 如果方向不同则不能进行合并
-                ious = np.diagonal(tracklet_ious_matrix)
-                # print('track{0} and track{1} iou is {2}'.format(id1,id2,np.mean(ious[frame_span.index(min(tmp_span)):frame_span.index(max(tmp_span))+1])))
-                if np.mean(ious[frame_span.index(min(tmp_span)):frame_span.index(max(tmp_span))+1]) > 0.55: # 0.66,0.57，0.64
-                    # 不是一个人的最大0.478,0.60
-                    id = min(id1,id2)
-                    remove_id = max(id1,id2)
-                    # track[id] = dict(track1,**track2) # 关键字必须是str数据类型
-                    cluster_tracks[id].update(cluster_tracks[remove_id]) # 会有同一帧当中的node
-                    # combine_list[id1,id2] = np.mean(ious[frame_span.index(min(tmp_span)):frame_span.index(max(tmp_span))+1])
-                    remove_list.append(remove_id)
-            elif set(frame_span1).issubset(set(frame_span2)) or set(frame_span2).issubset(set(frame_span1)):
-                # 是否需要删除多余
-                common_frames = set(frame_span1).intersection(set(frame_span2))
-                tracklet_bbox1 = np.array([frame_bbox1[frame] for frame in common_frames])
-                tracklet_bbox2 = np.array([frame_bbox2[frame] for frame in common_frames])
-                tracklet_overlap_matrix  = compute_iou_between_bbox_list(tracklet_bbox1.reshape(-1, 2, 2), tracklet_bbox2.reshape(-1, 2, 2))
-                overlap = np.diagonal(tracklet_overlap_matrix)
-                if np.mean(overlap) > 0.8:
-                    print('track{0} and track{1} overlap is {2}'.format(id1,id2,np.mean(overlap)))
-                    id = id1 if len(frame_span1) < len(frame_span2) else id2 # id表示取其中frame_span更短的那一个
-                    remove_list.append(id)
 
-    remove_list = np.unique(remove_list).tolist()
-    print('removed list',remove_list)
-    [cluster_tracks.pop(trackid) for trackid in remove_list]
-    ############ 对K-means当中与split_each_track当中重合度较高的轨迹进行合并 #########
-    print('### processing cluster results and original ssp###')
-    cluster_tracks = remove_dulplicate_frames(cluster_tracks)
-    if config["debug"]:
-        show_fix_clusters(cluster_tracks,mapping_node_id_to_bbox_second)
-    return results_return(definite_track_list,cluster_tracks)
 def whether_on_border(x1,y1,x2,y2):
     global frame_width,frame_height
     gap = 60  # gap设置太大会把最后一段轨迹给分开来
@@ -3282,10 +2407,11 @@ def track(exp,config):
     global tracklet_len
     global gap
     tracklet_len = config["tracklet_len"]
-    all_terminate_track_list = []
     #### initialization ####
-    output_dir = osp.join(exp.output_dir, config["benchmark"],str(config["split"]),config["seq_name"],'window_size_'+str(config["tracklet_len"]))#exp.output_dir='./YOLOX_outputs,benchmark:dataset name
+    output_dir = osp.join(exp.output_dir, config["benchmark"],str(config["split"]),config["seq_name"],time.strftime("%b%d_%H%M_")+'window_size_'+str(config["tracklet_len"]))#exp.output_dir='./YOLOX_outputs,benchmark:dataset name
     os.makedirs(output_dir, exist_ok=True)
+    shutil.copyfile(config["cfg_file"], os.path.join(output_dir, "ml_memAE_sc_cfg.yaml"))
+
     file_name = os.path.join(exp.output_dir, config["benchmark"])
 
     ssp_path = os.path.join(output_dir,'vis_ssp_first') # 第一次ssp结果路径,不能以/结尾
@@ -3359,6 +2485,8 @@ def track(exp,config):
     unmatched_tracks_memory_dict = {} # 记忆轨迹unmatched的次数，超过一定次数之后舍弃轨迹
     # for path, img, im0s, vid_cap in dataset: # check whether in reasonable order
     img_size = exp.test_size # (896,1600)
+    results = []
+    tracker = SSPTracker(config)
     for frame_id,img_path in enumerate(files,1):
         # Detect objects
         outputs, img_info = predictor.inference(img_path, timer)
@@ -3367,7 +2495,7 @@ def track(exp,config):
         # Process detections
         box_detected = []
         box_confidence_scores = []
-        # 使用自带detector
+
         # 每次只保存当前batch的结果
         # tracklet_pose_collection = conduct_pose_estimation(webcam, path, out, im0s, pred, img, dataset, save_txt, save_img, view_img, box_detected, head_box_detected, foreignmatter_box_detected, box_confidence_scores, head_box_confidence_scores, foreignmatter_box_confidence_scores, centers, scales, vid_path, vid_writer, vid_cap, tracklet_pose_collection, names, colors, pose_transform, bbox_confidence_threshold, tracklet_inner_cnt, need_face_recognition_switch, face_verification_thresh, opt['iou_thres'])
         if outputs[0] is not None:
@@ -3416,29 +2544,23 @@ def track(exp,config):
         ######################################################## conduct tracking ######################################################################
 
         if ((tracklet_inner_cnt + 1) >= tracklet_len + batch_id*batch_stride or batch_id == batch_cnt-1) and ({} not in tracklet_pose_collection): # and (whether_conduct_tracking == 1):
-            # (batch_id+1)*
             batch_id += 1
             print('batch', batch_id)
-            time_start = time.time()
             # allen added to filter out frames without people or without head,进入到下一帧
             if min([len(x['bbox_list']) for x in tracklet_pose_collection]) == 0: # or min([len(x['head_bbox_list']) for x in tracklet_pose_collection[-tracklet_len:]]) == 0:
                 tracklet_inner_cnt += 1
                 continue
-
             ################################################ collect the vectors of bboxes #############################################################
-            reid_start_time = time.time()
             mapping_node_id_to_bbox,mapping_edge_id_to_cost,mapping_node_id_to_features = mapping_data_preparation(files,encoder,tracklet_pose_collection, tracklet_inner_cnt,True)
             ### 需要对第二次ssp当中的tracklet_pose_collection_second进行修正 ###
-            ##################################################################################################################################
             ############################ organize graph and call #############################################################################
-            # time_start = time.time()
+
             # if int(mapping_node_id_to_bbox[max([x for x in mapping_node_id_to_bbox])][2][:-4]) == len(dataset.files) - 1 and len(mapping_node_id_to_bbox) == 0 and len(mapping_edge_id_to_cost) == 0:
             if int(mapping_node_id_to_bbox[max([x for x in mapping_node_id_to_bbox])][2][:-4]) == len(files) - 1 and len(mapping_node_id_to_bbox) == 0 and len(mapping_edge_id_to_cost) == 0:
                 break
-            # time_start = time.time()
+
             result = tracking(mapping_node_id_to_bbox, mapping_edge_id_to_cost, tracklet_inner_cnt) # tracking函数为ssp算法实现
-            time_end = time.time()
-            # print('SSP computing time: ' + str(time_end - time_start))
+
             indefinite_node = [] # 表示第一次ssp当中不确定的点
             error_tracks = [] # 第一次ssp当中出错的轨迹段
             split_each_track_SSP, split_each_track_valid_mask  = update_split_each_track_valid_mask(result)
@@ -3564,124 +2686,41 @@ def track(exp,config):
                                 cv2.putText(curr_img, str(human_id), (left, top), cv2.FONT_HERSHEY_SIMPLEX, 1,(0, 0, 255), 2)
                     cv2.imwrite(fixed_result_path + '/'+str(tracklet_inner_cnt) + '_' + frame_name, curr_img)
             # if previous_video_segment_predicted_tracks != {}:
-            if batch_id > 1:
-                node_matching_dict = {}
-                result_dict,previous_unmatched_tracks,curr_unmatched_tracks,terminate_track_list,curr_batch_invalid_list = stitching_tracklets(mapping_node_id_to_bbox,node_matching_dict,tracklet_inner_cnt, current_video_segment_predicted_tracks, previous_video_segment_predicted_tracks, current_video_segment_predicted_tracks_bboxes, previous_video_segment_predicted_tracks_bboxes, current_video_segment_representative_frames, previous_video_segment_representative_frames,current_video_segment_predicted_tracks_bboxes_test,previous_video_segment_predicted_tracks_bboxes_test,unmatched_tracks_memory_dict)
-                all_terminate_track_list.extend(terminate_track_list)
-
-                ### delete invalid tracks ####
-                for invalid_track in curr_batch_invalid_list: # 对于终止的track直接删除不再参与之后的匹配
-                    current_video_segment_predicted_tracks_bboxes.pop(invalid_track)
-                    current_video_segment_predicted_tracks.pop(invalid_track)
-                    current_video_segment_representative_frames.pop(invalid_track)
-                    current_video_segment_predicted_tracks_bboxes_test.pop(invalid_track)
-                    current_trajectory_similarity_dict.pop(invalid_track)
-
-            #######   整个轨迹txt写入  ########
-            '''
-            按照每个batch来写
-            '''
-            # previous_unmatched_tracks,curr_unmatched_tracks
-            # 如果是第一个batch则写入所有数据
-            new_track_id = 0
-            # current_video_segment_all_traj_all_object_features_backup = copy.deepcopy(current_video_segment_all_traj_all_object_features)
-            if batch_id == 1:
-                current_video_segment_predicted_tracks_backup = copy.deepcopy(current_video_segment_predicted_tracks)
-                current_video_segment_predicted_tracks_bboxes_backup = copy.deepcopy(current_video_segment_predicted_tracks_bboxes)
-                current_video_segment_representative_frames_backup = copy.deepcopy(current_video_segment_representative_frames)
-                current_video_segment_predicted_tracks_bboxes_test_backup = copy.deepcopy(current_video_segment_predicted_tracks_bboxes_test)
-                current_trajectory_similarity_dict_backup = copy.deepcopy(current_trajectory_similarity_dict)
-                #all_video_predicted_tracks = copy.deepcopy(current_video_segment_predicted_tracks_bboxes)
-                total_txt = open(txtname, 'w')
-                base_track_id += len(split_each_track)  # 给没有匹配上的轨迹起始编号
-
-                for frame_name in unique_frame_list:
-                    curr_img = cv2.imread(os.path.join(config["path"], frame_name))
-                    for human_id in current_video_segment_predicted_tracks_bboxes: # 第一帧所有的human_id与轨迹id相同
-                        for bbox in current_video_segment_predicted_tracks_bboxes[human_id]: # dict bbox:key
-                            if bbox == frame_name: #  写入帧数，轨迹数，坐标
-                                total_txt.write(str(int(frame_name.split('.')[0])) + ',' + str(human_id) + ',' + \
-                                                     str(current_video_segment_predicted_tracks_bboxes[human_id][bbox][0][0]) + ',' + \
-                                                     str(current_video_segment_predicted_tracks_bboxes[human_id][bbox][0][1]) + ',' + \
-                                                     str(current_video_segment_predicted_tracks_bboxes[human_id][bbox][1][0]-current_video_segment_predicted_tracks_bboxes[human_id][bbox][0][0]) + ',' + \
-                                                     str(current_video_segment_predicted_tracks_bboxes[human_id][bbox][1][1]-current_video_segment_predicted_tracks_bboxes[human_id][bbox][0][1]) + ',-1,-1,-1,-1\n') # mot格式：必须10个数
-                                left, top = int(current_video_segment_predicted_tracks_bboxes[human_id][bbox][0][0]), int(current_video_segment_predicted_tracks_bboxes[human_id][bbox][0][1])
-                                right, bottom = int(current_video_segment_predicted_tracks_bboxes[human_id][bbox][1][0]), int(current_video_segment_predicted_tracks_bboxes[human_id][bbox][1][1])
-                                cv2.rectangle(curr_img, (left, top), (right, bottom), (0, 255, 0), 2)
-                                cv2.putText(curr_img, str(human_id), (left, top), cv2.FONT_HERSHEY_SIMPLEX, 1,(0, 0, 255), 2)
-                    cv2.imwrite(vis_result_path + '/' + str(tracklet_inner_cnt) + '_' + frame_name, curr_img)
-
-                total_txt.close()
+            online_targets = tracker.update(current_video_segment_predicted_tracks_bboxes_test,config,frame_list)
+            if tracker.batch_id == 1:
+                valid_frames = tracker.frames
+            elif tracker.batch_id == batch_cnt:
+                valid_frames = tracker.frames[-(total_frames - (batch_id - 1) * batch_stride - 1):]
             else:
-                total_txt = open(txtname, 'a')
-                # frame_list = [unique_frame_list[-1]] # int类型不可以迭代
-                frame_list = unique_frame_list[-batch_stride_write:] # int类型不可以迭代
-                if batch_id == batch_cnt:
-                    frame_list = unique_frame_list[-(total_frames - (batch_id-1)*batch_stride-1):]
-                for frame_name in frame_list: # 只写入最后一帧,根据步长决定
-                    curr_img = cv2.imread(os.path.join(config["path"], frame_name))
-                    for human_id in current_video_segment_predicted_tracks_bboxes: # track_id,索引仍然按照该batch得到的轨迹来,只是改变写入到总的txt以及画的图当中的结果
-                        if human_id not in result_dict:
-                            # 如果是新增轨迹的话,之后的batch才可能有新增轨迹
-                            new_track_id += 1
-                            human_id_txt = base_track_id + new_track_id # 写入结果中的轨迹id
-                            result_dict[human_id] = human_id_txt
-                        else:
-                            human_id_txt = result_dict[human_id] # 写入的时候改为前一个batch当中轨迹值
-                        for bbox in current_video_segment_predicted_tracks_bboxes[human_id]: # dict bbox:key
-                            if bbox == frame_name: #  写入帧数，轨迹数，坐标
-                                total_txt.write(str(int(frame_name.split('.')[0])) + ',' + str(human_id_txt) + ',' + \
-                                                     str(current_video_segment_predicted_tracks_bboxes[human_id][bbox][0][0]) + ',' + \
-                                                     str(current_video_segment_predicted_tracks_bboxes[human_id][bbox][0][1]) + ',' + \
-                                                     str(current_video_segment_predicted_tracks_bboxes[human_id][bbox][1][0]-current_video_segment_predicted_tracks_bboxes[human_id][bbox][0][0]) + ',' + \
-                                                     str(current_video_segment_predicted_tracks_bboxes[human_id][bbox][1][1]-current_video_segment_predicted_tracks_bboxes[human_id][bbox][0][1]) + ',-1,-1,-1,-1\n') # mot格式：必须10个数
-                                left, top = int(current_video_segment_predicted_tracks_bboxes[human_id][bbox][0][0]), int(current_video_segment_predicted_tracks_bboxes[human_id][bbox][0][1])
-                                right, bottom = int(current_video_segment_predicted_tracks_bboxes[human_id][bbox][1][0]), int(current_video_segment_predicted_tracks_bboxes[human_id][bbox][1][1])
-                                cv2.rectangle(curr_img, (left, top), (right, bottom), (0, 255, 0), 2)
-                                cv2.putText(curr_img, str(human_id_txt), (left, top), cv2.FONT_HERSHEY_SIMPLEX, 1,(0, 0, 255), 2)
-                        current_video_segment_predicted_tracks_bboxes_backup[human_id_txt] = current_video_segment_predicted_tracks_bboxes[human_id]
-                        current_video_segment_predicted_tracks_backup[human_id_txt] = current_video_segment_predicted_tracks[human_id]
-                        current_video_segment_representative_frames_backup[human_id_txt] = current_video_segment_representative_frames[human_id]
-                        current_video_segment_predicted_tracks_bboxes_test_backup[human_id_txt] = current_video_segment_predicted_tracks_bboxes_test[human_id]
-                        current_trajectory_similarity_dict_backup[human_id_txt] = current_trajectory_similarity_dict[human_id]
+                valid_frames = tracker.frames[-tracker.update_len:] # int类型不可以迭代
 
-                    cv2.imwrite(vis_result_path + '/'+ str(tracklet_inner_cnt) + '_' + frame_name, curr_img)
-
-                total_txt.close()
-                base_track_id += len(curr_unmatched_tracks) # 更新base_track_id
-
-                for unmatch in previous_unmatched_tracks: # 保留上一次未匹配的轨迹，每次会有很多重复的
-                    if unmatch not in unmatched_tracks_memory_dict:
-                        unmatched_tracks_memory_dict[unmatch] = 1 # 初始化未配对次数
-                    else:
-                        unmatched_tracks_memory_dict[unmatch] += 1 # 次数+1
-                    if unmatched_tracks_memory_dict[unmatch] >= 10: # 次数 >= 3之后忽略，认为轨迹终止
-                        continue
-                    current_video_segment_predicted_tracks_bboxes_backup[unmatch] = copy.deepcopy(previous_video_segment_predicted_tracks_bboxes[unmatch])
-                    current_video_segment_predicted_tracks_backup[unmatch] = copy.deepcopy(previous_video_segment_predicted_tracks[unmatch])
-                    current_video_segment_predicted_tracks_bboxes_test_backup[unmatch] = copy.deepcopy(previous_video_segment_predicted_tracks_bboxes_test[unmatch])
-                for terminate_track in all_terminate_track_list: # 对于终止的track直接删除不再参与之后的匹配
-                    if terminate_track in current_video_segment_predicted_tracks_bboxes_backup:
-                        current_video_segment_predicted_tracks_bboxes_backup.pop(terminate_track)
-                        current_video_segment_predicted_tracks_backup.pop(terminate_track)
-                        current_video_segment_predicted_tracks_bboxes_test_backup.pop(terminate_track)
-            # 更新上一帧的值
-            previous_video_segment_predicted_tracks = copy.deepcopy(current_video_segment_predicted_tracks_backup)
-            previous_video_segment_predicted_tracks_bboxes = copy.deepcopy(current_video_segment_predicted_tracks_bboxes_backup)
-            previous_video_segment_representative_frames = copy.deepcopy(current_video_segment_representative_frames_backup)
-            previous_video_segment_predicted_tracks_bboxes_test = copy.deepcopy(current_video_segment_predicted_tracks_bboxes_test_backup)
-
-            ## 清理内存
-            current_video_segment_predicted_tracks.clear()
-            current_video_segment_predicted_tracks_bboxes.clear()
-            current_video_segment_representative_frames.clear()
-            current_video_segment_all_traj_all_object_features.clear()
-            current_video_segment_predicted_tracks_bboxes_backup.clear()
-            current_video_segment_predicted_tracks_backup.clear()
-            current_video_segment_representative_frames_backup.clear()
-            current_video_segment_all_traj_all_object_features_backup.clear()
+            for frame in valid_frames: # 当前窗口需要写入的数据
+                online_tlwhs = []
+                online_ids = []
+                online_scores = []
+                for t in online_targets:
+                    if frame in t.frames:
+                        try:
+                            index = t.frames.index(frame)
+                            xyxy = t.xyxys[index]
+                            score = t.score[index]
+                            tid = t.track_id
+                            # if tlwh[2] * tlwh[3] > self.args.min_box_area:
+                            online_tlwhs.append(xyxy)
+                            online_ids.append(tid)
+                            online_scores.append(score)
+                        except IndexError: # OT-7
+                            # 捕获IndexError异常并打印错误信息
+                            print(f"IndexError: list index out of range at index {index},{frame},{t.frames}")
+                            print(len(t.xyxys))
+                # save results
+                results.append((frame, online_tlwhs, online_ids, online_scores)) # 当前帧的所有
+                img_path = os.path.join(config["path"], frame)
+                write_vis_results(img_path, vis_result_path, results)
 
         tracklet_inner_cnt += batch_stride  # 步长
+    write_results(txtname,results)
+
 
 
 if __name__ == '__main__':

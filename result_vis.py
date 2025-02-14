@@ -33,13 +33,13 @@ def plot_tracking(image, tlwhs, obj_ids, frame_id=0):
                     thickness=text_thickness)
     return im
 
-result_txt = '/home/allenyljiang/Documents/SSP_EM/YOLOX_outputs/MOT20/MOT20-07.txt'
-img_list = os.path.join('/media/allenyljiang/564AFA804AFA5BE5/Dataset/MOT20/test/MOT20-07/img1')
+result_txt = '/home/allenyljiang/Documents/SSP_EM/YOLOX_outputs/MOT20/window_size_10/MOT20-03.txt'
+img_list = os.path.join('/media/allenyljiang/564AFA804AFA5BE5/Dataset/MOT20/train/MOT20-03/img1')
 img_blob = sorted(os.listdir(img_list))
 seq_tracks = np.loadtxt(result_txt,delimiter=',') # 注意加上delimiter
 
-
-dst_path = os.path.join('MOT20_07vis')
+dst_path = '/home/allenyljiang/Documents/SSP_EM/YOLOX_outputs/MOT20/window_size_10/track_vis'
+#dst_path = os.path.join('MOT20_03vis')
 if not os.path.exists(dst_path):
     os.makedirs(dst_path)
 
@@ -51,8 +51,8 @@ for frame in range(int(seq_tracks[:,0].max())):
     dets = seq_tracks[seq_tracks[:,0] == frame,2:6] # 检测框
     #dets[:,2:4]+=dets[:,0:2]
     img = plot_tracking(img, dets, track_id, frame_id=frame)
-    if frame % 10 == 0:
-        cv2.imwrite(img_dst,img)
+    # if frame % 10 == 0:
+    cv2.imwrite(img_dst,img)
     if frame > 100:
         break
 

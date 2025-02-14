@@ -6,8 +6,8 @@
 #tsize:
 ## debug相关参数
 debug: True  #  保存中间结果
-specific_clip:  # 只保留多少帧结果
-
+specific_clip: 100 # 只保留多少帧结果
+cfg_file: "/home/allenyljiang/Documents/SSP_EM/configs/avenue.yaml"
 
 ## 数据集以及相关配置
 benchmark : Avenue
@@ -25,8 +25,9 @@ fast_reid_config: /home/allenyljiang/Documents/SSP_EM/fast_reid/configs/MOT20/sb
 fast_reid_weights: /home/allenyljiang/Documents/SSP_EM/models/mot20_sbs_S50.pth
 det_model_path: ./models/bytetrack_x_mot20.tar
 appearance_thresh: 0.25
-#proximity_thresh: 0.5
-
+with_reid: True
+proximity_thresh: 0.5
+iou_proximity_thresh: 0.5
 ## 系统参数
 trt: False
 fp16: True
@@ -35,10 +36,11 @@ device: cuda:0
 batch_size: 1
 
 ## 跟踪关键参数
-match_thresh: 0.7
+match_thresh: 0.8
 track_high_thresh: 0.6
 track_low_thresh: 0.1
 track_buffer: 30
+new_track_thresh: 0.7
 #new_track_thresh = args.track_high_thresh + 0.1  # 0.7
 ## 窗口滑动参数
 tracklet_len: 12

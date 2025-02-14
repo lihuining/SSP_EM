@@ -69,7 +69,26 @@ def ious(atlbrs, btlbrs):
 
     return ious
 
+def iou_distance_segments(atracks, btracks):
+    """
+    计算滑动窗口之间的iou相似度，前一个segment最后一帧与当前segment第一帧
+    Compute cost based on IoU
+    :type atracks: list[STrack]
+    :type btracks: list[STrack]
 
+    :rtype cost_matrix np.ndarray
+    """
+
+    if (len(atracks)>0 and isinstance(atracks[0], np.ndarray)) or (len(btracks) > 0 and isinstance(btracks[0], np.ndarray)):
+        atlbrs = atracks
+        btlbrs = btracks
+    else:
+        atlbrs = [track.tlbr_l for track in atracks]
+        btlbrs = [track.tlbr_f for track in btracks]
+    _ious = ious(atlbrs, btlbrs)
+    cost_matrix = 1 - _ious
+
+    return cost_matrix
 def iou_distance(atracks, btracks):
     """
     Compute cost based on IoU
@@ -175,6 +194,18 @@ def fuse_score(cost_matrix, detections):
         return cost_matrix
     iou_sim = 1 - cost_matrix
     det_scores = np.array([det.score for det in detections])
+    det_scores = np.expand_dims(det_scores, axis=0).repeat(cost_matrix.shape[0], axis=0)
+    fuse_sim = iou_sim * det_scores
+    fuse_cost = 1 - fuse_sim
+    return fuse_cost
+def fuse_score_segment(cost_matrix, detections):
+    '''
+    segment 的话取第一帧的score或者平均值？
+    '''
+    if cost_matrix.size == 0:
+        return cost_matrix
+    iou_sim = 1 - cost_matrix
+    det_scores = np.array([det.score[0] for det in detections])
     det_scores = np.expand_dims(det_scores, axis=0).repeat(cost_matrix.shape[0], axis=0)
     fuse_sim = iou_sim * det_scores
     fuse_cost = 1 - fuse_sim
